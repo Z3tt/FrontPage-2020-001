@@ -1,0 +1,2964 @@
+---
+title: "Keyword Analytics"
+author: "Daniel Kupka & Cédric Scherer"
+date: 2020-01-20
+output:
+  html_document:
+    theme: journal
+    highlight: kate
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r rmd-setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+#### TO DOs
+
+<font size="+1" face="montserrat">
+<br>
+* Heatmap with largest discrepancy
+<br><br>
+* How to deal with min ranked keywords? Try again for DIF + CPC! (also makes more sense than volume)
+<br><br>
+- Sixtrix hat nur sehr wenige Datenpunkte/Keywords (2,368/10,000) -> ist halt so, wird dann vermerkt.
+<br><br>
+* DONE Lollipops (VOL, DIF, CPC) per Volume Category
+<br><br>
+* DONE Remove DIF from Lollipops
+<br><br>
+* DONE One Overview Plot: How many Observations per Category (KWS, VOL, DIF, CPC) and missing?
+<br><br>
+* DONE Dot Plot: Larger differences for small values (log? manual?)
+<br><br>
+* DONE Adjust row/col Facet Keywords by Length
+<br><br>
+* DONE: Length: Beispielrechnung (e.g. ein Character weniger führt zu x mehr Volume)
+<br><br>
+* DONE Move to Appendix:
+  - DONE Histograms
+  - DONE Tables
+  - DONE Linear Jitter Plots
+  - DONE Bar Plots
+  - DONE Keywords by Length
+<br><br>
+-> 4-5 finale Grafiken
+<br>
+-> ich highlighte mal meine Favorites
+</font>
+
+```{r setup}
+## save plots?
+save <- TRUE
+#save <- FALSE
+
+## packages
+required_packages <- c("tidyverse", "readxl", "ggthemes", "hrbrthemes", "extrafont", "plotly", "scales", "stringr", "gganimate", "here", "tidytext", "sentimentr", "scales", "DT", "here", "sm", "mblm", "prettydoc", "reshape2", "treemapify", "glue", "magick", "imager", "fs", "knitr", "DataExplorer", "inspectdf", "rmdformats", "prettydoc", "janitor", "showtext", "ggbeeswarm", "ggtext", "kableExtra", "rcartocolor", "ggsci", "patchwork")
+
+for(i in required_packages) { 
+  if(!require(i, character.only = T)) {
+    #  if package is not existing, install then load the package
+    install.packages(i, dependencies = T)
+    library(i, character.only = T)
+  }
+}
+
+## theme updates
+font_add_google("Montserrat", "Montserrat")
+
+theme_set(ggthemes::theme_clean(base_size = 15, base_family = "Montserrat"))
+
+theme_update(plot.background = element_rect(color = NA),
+             #panel.background = element_rect(color = "grey20", size = .4), ## turn off if lighter version
+             plot.title = element_markdown(size = 18, hjust = .5, face = "plain"),
+             plot.subtitle = element_text(size = 12, hjust = .5, face = "plain"),
+             axis.line.x = element_line(color = "grey20"),  ## turn off if full panel border
+             axis.line.y = element_line(color = "grey20"),  ## turn off if full panel border
+             #axis.line.x = element_blank(), axis.line.y = element_blank(), ## turn off if lighter version
+             axis.ticks = element_line(color = "grey20", size = .3),
+             axis.title.x = element_text(face = "plain", margin = margin(t = 10)),
+             axis.title.y = element_text(face = "plain", margin = margin(r = 10)),
+             axis.text = element_text(color = "grey20"),
+             legend.title = element_text(color = "grey33"),
+             legend.text = element_text(family = "Montserrat", size = 10, color = "grey33"),
+             legend.background = element_rect(fill = NA, color = NA))
+
+## theme settings for flipped plots
+theme_flip <- 
+  theme(panel.grid.major.x = element_line(colour = "gray", linetype = "dotted", size = .25),
+        panel.grid.major.y = element_blank(),
+        axis.title = element_text(face = "bold"),
+        axis.text.y = element_text(face = "bold"),
+        legend.position = "bottom")
+
+## theme settings for facet plots
+theme_facet <-
+  theme(axis.text.y = element_text(face = "plain", size = 10),
+        axis.text.x = element_text(size = 8),
+        strip.text = element_text(face = "bold"),
+        plot.margin = margin(10, 10, 10, 25),
+        panel.spacing = unit(1, "lines"))
+
+## theme settings for lollipop plots
+theme_lolli <- 
+  theme(axis.title.x = element_text(size = 13, color ="grey20"),
+        axis.text.x = element_text(size = 11),
+        axis.text.y = element_blank(),
+        axis.line.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.grid.major.x = element_line(size = 0.6, color = "grey70"),
+        plot.margin = margin(5, 20, 5, 20),
+        plot.background = element_rect(fill = NA, color = NA))
+
+## numeric format for labels
+num_format <- format_format(big.mark = ",", small.mark = ",", scientific = F)
+```
+
+
+# 1 Introduction
+
+There is a wealth of Software-as-a-Service (SaaS) companies today that offer a range of
+keyword analytics data, such as keyword search volume and keyword difficulty scores. For
+the end user, it is often challenging to make informed comparisons between different data
+providers, which may be skewed or misleading when viewed individually.
+
+This large-scale analysis of Keyword Analytics data aims to compare data across various SEO tools.More specificially we will do a comparision of the following variables:
+
+* Keyword Suggestions
+* Average Monthly Search Volume
+* Keyword Difficulty
+* Cost-per-Click Ads data (in US dollar)
+
+We compare the data of a total of 9 tools:
+
+* Google Keyword Planner
+* Ahrefs
+* SEMrush
+* Moz
+* KeywordTool.io
+* KWfinder
+* SECockpit
+* Sixtrix
+* LongtailPro (only Volume, Difficulty & CPC)
+* Ubersuggest (only Keyword Suggestions)
+
+<span style="color:red;">METHODOLOGY PART -> Daniel</span>
+
+```{r 1-DAT-data-tools}
+## path to processed data
+rmd_tools <- here("proc_data", "tools.Rmd")
+
+## if data is not available, load, clean and bind datasets
+if(!file.exists(rmd_tools)){
+  ### load data #################################################################
+  
+  ## Google Keyword Planner Data (Tool #1)
+  df_gkp_raw <- read_csv(here("raw_data", "Step3_Tools_data", "1_Google_keyword_Planer_basis", "GKP_data_final_split.csv"))
+  
+  ## Ahrefs Data (Tool #2)
+  df_ahr_raw <- read_csv(here("raw_data", "Step3_Tools_data", "2_Ahrefs", "export", "ahrefs_export.csv"))
+  ## contains less rows than GKP data as the tool does not have enough data points. Should go into the analysis.
+  
+  ## Moz (Tool #3)
+  path <- here("raw_data", "Step3_Tools_data", "3_Moz", "export")
+  file_names_csv <- list.files(path = path, recursive = T, full.names = T) 
+  file <- map(file_names_csv, 
+              function(x) read_csv(x, skip = 13) %>% 
+                            mutate(`Min Volume` = as.numeric(`Min Volume`),
+                                   `Max Volume` = as.numeric(`Max Volume`))) 
+  names(file) <- gsub(".csv","", list.files(path, full.names = F), fixed = T)
+  
+  df_moz_raw <- 
+    bind_rows(file, .id = "column_name") %>% 
+    clean_names() 
+  
+  ## SEMRush (Tool #4)
+  path <- here("raw_data", "Step3_Tools_data", "4_SemRush", "export")
+  file_names_csv <- list.files(path = path, recursive = T, full.names = T) 
+  file <- map(file_names_csv, read_csv) 
+  names(file) <- gsub(".csv","", list.files(path, full.names = F), fixed = T)
+  
+  df_sem_raw <- 
+    bind_rows(file, .id = "column_name") %>% 
+    clean_names() 
+  
+  ## KeywordTool.io (Tool #5)
+  path <- here("raw_data", "Step3_Tools_data", "5_Keywordtool", "export")
+  file_names_csv <- list.files(path = path, recursive = T, full.names = T) 
+  file <- map(file_names_csv, read_csv) 
+  names(file) <- gsub(".csv","", list.files(path, full.names = F), fixed = T)
+  
+  df_kwst_raw <- 
+    bind_rows(file, .id = "column_name") %>% 
+    clean_names() 
+  
+  ## KWFinder (Tool #6)
+  path <- here("raw_data", "Step3_Tools_data", "6_KWfinder", "export")
+  file_names_csv <- list.files(path = path, recursive = T, full.names = T) 
+  file <- map(file_names_csv, read_csv) 
+  names(file) <- gsub(".csv","", list.files(path, full.names = F), fixed = T)
+  
+  df_kwsf_raw <- 
+    bind_rows(file, .id = "column_name") %>% 
+    clean_names() 
+  
+  ## LongtailPro (Tool #7)
+  path <- here("raw_data", "Step3_Tools_data", "7_LongtailPro", "export")
+  file_names_csv <- list.files(path = path, recursive = T, full.names = T) 
+  file <- map(file_names_csv, read_csv) 
+  names(file) <- gsub(".csv","", list.files(path, full.names = F), fixed = T)
+  
+  df_ltp_raw <- 
+    bind_rows(file, .id = "column_name") %>% 
+    clean_names() 
+  
+  ## SECockpit (Tool #8)
+  path <- here("raw_data", "Step3_Tools_data", "8_SECockpit", "export")
+  file_names_csv <- list.files(path = path, recursive = T, full.names = T) 
+  file <- map(file_names_csv, function(x) read_csv2(x)) 
+  names(file) <- gsub(".csv","", list.files(path, full.names = F), fixed = T)
+  
+  df_sec_raw <- 
+    bind_rows(file, .id = "column_name") %>% 
+    clean_names() 
+  
+  ## Sixtrix (Tool #9)
+  path <- here("raw_data", "Step3_Tools_data", "9_Sixtrix", "export")
+  file_names_csv <- list.files(path = path, recursive = T, full.names = T) 
+  file <- map(file_names_csv, read_csv2) 
+  names(file) <- gsub(".csv","", list.files(path, full.names = F), fixed = T)
+  
+  df_six_raw <- 
+    bind_rows(file, .id = "column_name") %>% 
+    clean_names() 
+  
+  
+  ### clean data ################################################################
+  
+  ## select relevant columns and bind all tools
+  ## Google Key Planner
+  df_gkp <-
+    df_gkp_raw %>% 
+    mutate(
+      tool_id = 1,
+      tool = "Google Keyword Planner"
+    ) %>% 
+    dplyr::select(
+      tool_id, tool,
+      keyword,
+      volume = "avg_monthly_searches.x",
+      cpc_min = "top_of_page_bid_low_range.y",
+      cpc_max = "top_of_page_bid_high_range.y"
+    ) %>% 
+    mutate(
+      diff = NA_real_,  ## GKP dies not have a difficulty score output
+      cpc = cpc_max - (cpc_max - cpc_min) / 2     
+    ) %>% 
+    dplyr::select(-cpc_min, -cpc_max)
+  
+  ## Ahrefs
+  df_ahr <-
+    df_ahr_raw %>% 
+    mutate(
+      tool_id = 2,
+      tool = "Ahrefs"
+    ) %>% 
+    dplyr::select(
+      tool_id, tool,
+      keyword = "Keyword",
+      volume = "Volume",
+      diff = "Difficulty", 
+      cpc = "CPC"
+    ) 
+  
+  ## Moz
+  df_moz <-
+    df_moz_raw %>% 
+    mutate(
+      tool_id = 3,
+      tool = "Moz"
+    ) %>% 
+    dplyr::select(
+      tool_id, tool,
+      keyword,
+      max_volume, 
+      min_volume,
+      diff = "difficulty"
+    ) %>% 
+    mutate(
+      cpc = NA_real_,  ## Moz has no CPC output
+      volume = round(max_volume - (max_volume - min_volume) / 2, 0)
+    ) %>% 
+    dplyr::select(-max_volume, -min_volume)
+  
+  ## SEMrush
+  df_sem <-
+    df_sem_raw %>% 
+    mutate(
+      tool_id = 4,
+      tool = "SEMrush"
+    ) %>% 
+    dplyr::select(
+      tool_id, tool,
+      keyword,
+      volume,
+      diff = "keyword_difficulty", 
+      cpc = "cpc_usd"
+    ) 
+  
+  ## KeywordTool.io
+  df_kwst <-
+    df_kwst_raw %>% 
+    mutate(
+      tool_id = 5,
+      tool = "KeywordTool.io"
+    ) %>% 
+    dplyr::select(
+      tool_id, tool,
+      keyword = "keywords",
+      volume = "search_volume_average",
+      diff = "competition", 
+      cpc = "cpc_usd"
+    ) 
+  
+  ## KWFinder
+  df_kwsf <-
+    df_kwsf_raw %>% 
+    mutate(
+      tool_id = 6,
+      tool = "KWFinder"
+    ) %>% 
+    dplyr::select(
+      tool_id, tool,
+      keyword,
+      volume = "avg_search_volume",
+      diff = "keyword_difficulty", 
+      cpc
+    ) 
+  
+  ## LongtailPro
+  df_ltp <-
+    df_ltp_raw %>% 
+    mutate(
+      tool_id = 7,
+      tool = "LongtailPro"
+    ) %>% 
+    dplyr::select(
+      tool_id, tool,
+      keyword = "keywords",
+      volume,
+      diff = "avg_kc", 
+      cpc = "bid"
+    ) %>% 
+    mutate(cpc = as.numeric(str_sub(cpc, 2)))
+  
+  ## SECockpit
+  df_sec <-
+    df_sec_raw %>% 
+    mutate(
+      tool_id = 8,
+      tool = "SECockpit"
+    ) %>% 
+    dplyr::select(
+      tool_id, tool,
+      keyword = "phrase",
+      volume = "monthly_searches",
+      diff = "top_results", 
+      cpc
+    ) %>% 
+    mutate(
+      cpc = as.numeric(cpc),
+      diff = diff / max(diff) * 100  ## ??? top_results has a range from 6 to 464. Not sure hwat the possible max is so I take 464 for now
+    )  
+  
+  ## Sixtrix
+  df_six <-
+    df_six_raw %>% 
+    mutate(
+      tool_id = 9,
+      tool = "Sixtrix"
+    ) %>% 
+    dplyr::select(
+      tool_id, tool,
+      keyword = "x_u_feff_keyword",
+      volume = "search_volume",
+      diff = "competition",
+      cpc
+    ) %>% 
+    mutate(
+      ## extract max volume from range string
+      volume = str_replace(volume, ".*\\s", ""),  ## using the max of the range here
+      volume = str_replace(volume, "\\.", ""),
+      thousands = if_else(str_detect(volume, ".*K"), T, F),  ## dealing with "K" units
+      volume = str_replace(volume, "K", ""),
+      volume = if_else(thousands == T, 
+                       as.numeric(volume) * 1000, 
+                       as.numeric(volume)),
+      ## turn difficulty into numbers
+      diff = as.numeric(diff), ## turns "-" to NA - guess that's good!
+      ## clean cpc and convert to USD
+      cpc = str_replace(cpc, ",", "."),
+      cpc = str_sub(cpc, 1, -4),
+      cpc = as.numeric(cpc) * 1.11 ## EUR -> USD, exchange rate 2020-01-16 05:46 pm
+    ) %>% 
+    dplyr::select(-thousands)
+  
+  
+  ### add keyword categories ####################################################
+  
+  ## keyword categoies derived from GKP data
+  df_cat_join <-
+    df_gkp_raw %>% 
+    dplyr::select(keyword_cat = "column_name.x", keyword) %>% 
+    mutate(
+      keyword_cat = str_replace(keyword_cat, "^[^_]*_", ""),
+      keyword_cat = str_replace(keyword_cat, " -.*", ""),
+      keyword_cat = tools::toTitleCase(keyword_cat)
+    )
+  
+  ### final dataset #############################################################
+  
+  ## join all tools
+  df_tools <-
+    df_gkp %>% 
+    bind_rows(df_ahr) %>% 
+    bind_rows(df_moz) %>% 
+    bind_rows(df_sem) %>% 
+    bind_rows(df_kwst) %>% 
+    bind_rows(df_kwsf) %>% 
+    bind_rows(df_ltp) %>% 
+    bind_rows(df_sec) %>% 
+    bind_rows(df_six) %>% 
+    mutate(
+      tool = factor(tool, levels = unique(tool)),
+      volume_cat = case_when(
+        volume <= 100 ~ "0-100",
+        volume > 100 & volume <= 1000 ~ "100-1,000",
+        volume > 1000 & volume <= 10000 ~ "1,000-10,000",
+        volume > 10000 ~ "10,000+"
+      ),
+      volume_cat = factor(volume_cat, levels = c("0-100", "100-1,000", "1,000-10,000", "10,000+"))
+    ) %>% 
+    filter(is.na(cpc) | cpc > 0) ## remove $0 "costs"
+  
+  saveRDS(df_tools, file = rmd_tools)
+  saveRDS(df_cat_join, file = here("proc_data", "kw_cat_join.Rmd"))
+
+}else{
+  df_tools <- readRDS(rmd_tools)
+  df_cat_join <- readRDS(here("proc_data", "kw_cat_join.Rmd"))
+}
+
+## long format with volume, difficulty + cpc as one column 'cateogry'
+df_tools_long <-
+  df_tools %>% 
+  dplyr::select(-tool_id) %>% 
+  pivot_longer(c(-tool, -keyword, -volume_cat),
+               names_to = "category",
+               values_to = "value")
+```
+
+```{r 1-DAT-keyword-suggestions}
+## path to processed data
+rmd_kws <- here("proc_data", "keyword_suggestions.Rmd")
+
+## load version 1 csv
+df_kws_raw <- read_csv(here("raw_data", "Step3_Tools_data", "keyword_suggestions", "keyword_suggestions_v1.csv")) %>% 
+  clean_names() 
+
+if(!file.exists(rmd_kws)){
+  
+  ### clean data ################################################################
+  
+  ## Transform data into long format (two columns with *SEO tool* (`tool`) 
+  ## and *suggested keywords* (`suggested`))
+  df_kws <-
+    df_kws_raw %>% 
+    mutate_at(vars(se_cockpit, se_mrush_broad_match:kw_finder_related_keywords), as.numeric) %>% 
+    pivot_longer(
+      cols = se_cockpit:kw_finder_related_keywords,
+      names_to = "tool",
+      values_to = "suggested"
+    ) %>% 
+    ## remove not avilable values
+    filter(!is.na(suggested)) %>%
+    ## remove combination of keyword search for now (since not all provide it)
+    filter(!str_detect(keyword, "All 5 KW")) %>% 
+    ## Clean SEO tool names
+    mutate(tool = 
+      factor(
+        tool,
+        levels = c("google_keyword_planner", 
+                   "ahrefs_all_keyword_ideas", 
+                   "ahrefs_phrase_match", 
+                   "se_mrush_broad_match", 
+                   "se_mrush_phrase_match", 
+                   "moz_include_a_mix_of_sources", 
+                   "se_cockpit", 
+                   "keyword_tool_io_keyword_suggestions", 
+                   "sixtrix_word_group", 
+                   "kw_finder_related_keywords",
+                   "ubersuggest_related"),
+        labels = c("Google Keyword Planner", 
+                   "Ahrefs (all keyword ideas)", 
+                   "Ahrefs (phrase match)", 
+                   "SEMrush (broad match)", 
+                   "SEMrush (phrase match)", 
+                   "Moz (mix of sources)", 
+                   "SECockpit", 
+                   "KeywordTool.io", 
+                   "Sixtrix",
+                   "KWFinder",
+                   "Ubersuggest (related)")
+        )
+    ) %>% 
+    ## Sort SEO tools and keyword categories by mean number of suggestions
+    group_by(tool) %>% 
+    mutate(tool_median = median(suggested)) %>% 
+    group_by(category) %>% 
+    mutate(category_median = median(suggested)) %>% 
+    ungroup() %>% 
+    mutate(
+      tool_fct = fct_reorder(tool, tool_median),
+      category_fct = fct_reorder(category, category_median),
+    )
+  
+  ### final dataset ########################################################
+  
+  saveRDS(df_kws, file = rmd_kws)
+  
+}else{
+  df_kws <- readRDS(rmd_kws)
+}
+
+## range of suggestions
+range_kw <- range(df_kws$suggested)
+
+## number of keywords per cateory 
+## (based on the un-cleanded data since we have removed NAs)
+n_kw_cat <-
+  df_kws_raw %>% 
+  group_by(category) %>% 
+  count() %>% 
+  ungroup() %>% 
+  summarize(n = unique(n)) %>% 
+  pull(n)
+```
+
+```{r 1-DAT-overview-requests, fig.width = 8, fig.height = 14}
+dat_kws <-
+  df_kws %>% 
+  mutate(count_na = sum(is.na(suggested))) %>% 
+  group_by(tool, count_na) %>% 
+  summarize(n = n()) %>% 
+  ungroup() %>% 
+  mutate(tool_fct = fct_reorder(tool, n)) %>% 
+  ggplot(aes(tool_fct, n)) +
+    geom_col(aes(x = tool_fct, 75, color = tool), fill = "grey90", size = 1.1, width = 0.7) +
+    geom_col(aes(fill = tool), color = NA, width = 0.7, alpha = 0.6) +
+    geom_text(aes(tool_fct, n - 1, label = comma(n, accuracy = 1)), 
+              color = "white", fontface = "bold", family = "Montserrat", size = 2.5, hjust = 1) +
+    coord_flip() +
+    scale_y_continuous(expand = c(.005, .005),
+                       breaks = seq(0, 75, by = 25)) +
+    scale_color_carto_d(palette = "Prism", guide = F) +
+    scale_fill_carto_d(palette = "Prism", guide = F) +
+    labs(x = NULL, y = "", title = "**Successful Search Requests per SEO Tool**<br>", subtitle = "Keyword Suggestions") +
+    theme_flip 
+  
+
+dat_vol <-
+  df_tools_long %>% 
+  filter(category == "volume") %>% 
+  group_by(tool) %>% 
+  summarize(n = sum(!is.na(value))) %>% 
+  ungroup() %>% 
+  mutate(tool_fct = fct_reorder(tool, n)) %>% 
+  ggplot(aes(tool_fct, n)) +
+    geom_col(aes(tool_fct, 10000, color = tool), fill = "grey90", size = 1.1, width = 0.7) +
+    geom_col(aes(fill = tool), color = NA, width = 0.7, alpha = 0.6) +
+    geom_text(aes(tool_fct, n - 90, label = comma(n, accuracy = 1), alpha = (n > 0)), 
+              color = "white", fontface = "bold", family = "Montserrat", size = 2.5, hjust = 1) +
+    geom_text(aes(tool_fct, n + 90, label = "not available", color = tool, alpha = n == 0), 
+              fontface = "bold", family = "Montserrat", size = 2.5, hjust = 0) +
+    coord_flip() +
+    scale_y_continuous(expand = c(.005, .005),
+                       labels = num_format,
+                       breaks = seq(0, 10000, by = 2000)) +
+    scale_color_carto_d(palette = "Bold", guide = F, limits = levels(df_tools$tool)) +
+    scale_fill_carto_d(palette = "Bold", guide = F, limits = levels(df_tools$tool)) +
+    scale_alpha_manual(values = c(0, 1), guide = F) +
+    labs(x = NULL, y = "", subtitle = "Keyword Search Volume") +
+    theme_flip 
+  
+dat_dif <-
+  df_tools_long %>% 
+  filter(category == "diff") %>% 
+  group_by(tool) %>% 
+  summarize(n = sum(!is.na(value))) %>% 
+  ungroup() %>% 
+  mutate(tool_fct = fct_reorder(tool, n)) %>% 
+  ggplot(aes(tool_fct, n)) +
+    geom_col(aes(tool_fct, 10000, color = tool), fill = "grey90", size = 1.1, width = 0.7) +
+    geom_col(aes(fill = tool), color = NA, width = 0.7, alpha = 0.6) +
+    geom_text(aes(tool_fct, n - 90, label = comma(n, accuracy = 1), alpha = (n > 0)), 
+              color = "white", fontface = "bold", family = "Montserrat", size = 2.5, hjust = 1) +
+    geom_text(aes(tool_fct, n + 90, label = "not available", color = tool, alpha = n == 0), 
+              fontface = "bold", family = "Montserrat", size = 2.5, hjust = 0) +
+    coord_flip() +
+    scale_y_continuous(expand = c(.005, .005),
+                       labels = num_format,
+                       breaks = seq(0, 10000, by = 2000)) +
+    scale_color_carto_d(palette = "Bold", guide = F, limits = levels(df_tools$tool)) +
+    scale_fill_carto_d(palette = "Bold", guide = F, limits = levels(df_tools$tool)) +
+    scale_alpha_manual(values = c(0, 1), guide = F) +
+    labs(x = NULL, y = "", subtitle = "Difficulty Scores") +
+    theme_flip 
+  
+dat_cpc <-
+  df_tools_long %>% 
+  filter(category == "cpc") %>% 
+  group_by(tool) %>% 
+  summarize(n = sum(!is.na(value))) %>% 
+  ungroup() %>% 
+  mutate(tool_fct = fct_reorder(tool, n)) %>% 
+  ggplot(aes(tool_fct, n)) +
+    geom_col(aes(tool_fct, 10000, color = tool), fill = "grey90", size = 1.1, width = 0.7) +
+    geom_col(aes(fill = tool), color = NA, width = 0.7, alpha = 0.6) +
+    geom_text(aes(tool_fct, n - 90, label = comma(n, accuracy = 1), alpha = (n > 0)), 
+              color = "white", fontface = "bold", family = "Montserrat", size = 2.5, hjust = 1) +
+    geom_text(aes(tool_fct, n + 90, label = "not available", color = tool, alpha = n == 0), 
+              fontface = "bold", family = "Montserrat", size = 2.5, hjust = 0) +
+    coord_flip() +
+    scale_y_continuous(expand = c(.005, .005),
+                       labels = num_format,
+                       breaks = seq(0, 10000, by = 2000)) +
+    scale_color_carto_d(palette = "Bold", guide = F, limits = levels(df_tools$tool)) +
+    scale_fill_carto_d(palette = "Bold", guide = F, limits = levels(df_tools$tool)) +
+    scale_alpha_manual(values = c(0, 1), guide = F) +
+    labs(x = NULL, y = "Search Requests", subtitle = "Cost per Click (CPC)") +
+    theme_flip 
+
+(dat_kws + dat_vol + dat_dif + dat_cpc) * 
+  theme(axis.line.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.y = element_text(size = 13, face = "plain"),
+        axis.text.x = element_text(size = 8),
+        plot.margin = margin(5, 25, 5, 5),
+        plot.title = element_markdown(size = 16),
+        plot.subtitle = element_text(face = "bold", size = 13)) + 
+  plot_layout(nrow = 4, heights = c(1.15, 1, 1, 1))
+
+if(save == T){ ggsave(here("plots", "1_DAT_overview_data.png"), width = 8, height = 14, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* `r n_distinct(df_kws$tool)` SEO tools for keyword suggestions with a maximum of `r n_distinct(df_kws$keyword)` keywords.
+
+* `r n_distinct(df_tools$tool)` SEO tools for keyword search volume, difficulty scores and cost per click (CPC) with a maximum of `r n_distinct(df_tools$keyword)` keywords.
+
+* *Google Keyword Planner* does not provide any information on difficulty scores.
+
+* *Moz* does not provide any information on cost per click.
+
+* *Sixtrix* has a low number of successful requests with 2,473 and 2,368 oberservations out of 10,000.
+<br><br>
+
+
+# 2 Keyword Suggestions
+
+There are `r n_distinct(df_kws$tool)` SEO tools, each used to search `r n_distinct(df_kws$keyword)` keywords. The keywords fall into `r n_distinct(df_kws$category)` categories with each category containing `r n_kw_cat`. Minimum of suggestions was `r range_kw[1]` and the highest values was `r range_kw[2]`.
+
+## 2.1 The Raw Data On a Logarithmic Scale
+
+To see more of the underlying pattern in keyword suggestions, we transform the x axis to a logarithmic scale and use so-called beeswarm plots to make the distribution more clear to the reader.
+
+#### Per SEO Tool:
+
+```{r 2-1-KWS-beeswarm-tool-log, fig.width = 14, fig.height = 10}
+## with log scale
+df_kws %>% 
+  group_by(tool) %>% 
+  mutate(median = median(log10(suggested))) %>% 
+  ggplot(aes(fct_reorder(tool, median), suggested)) + 
+    stat_summary(fun.y = median, geom = "point", 
+                 size = 6, color = "grey70") +
+    geom_quasirandom(aes(color = category_fct), 
+                     alpha = .7, size = 1.5, 
+                     width = .3, bandwidth = .3, varwidth = T) +
+    coord_flip() +
+    scale_y_log10(labels = num_format) +
+    scale_color_simpsons(name = "Keyword Category:") +
+    guides(color = guide_legend(override.aes = list(size = 5))) +
+    labs(x = NULL, y = "Keyword Suggestions",
+         title = "**Each Search by SEO Tool**",
+         subtitle = "(tools ranked by overall median)") +
+    theme_flip + 
+    theme(axis.text.y = element_text(size = 13))
+
+if(save == T){ ggsave(here("plots", "2_1_KWS_bees_tool.png"), width = 14, height = 10, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* Plot highlights how skewed the data is in terms of keyword categories and SEO tools (with a focus on categories).
+
+* Due to the skewed data, a logarithmic scale helps to visualize the large range of keyword suggestions.
+
+* *KWFinder*, *Google Keyword Planner*, and *KeywordTool.io* reach very low levels of suggestions with a median below 1,000.
+
+* *Ahrefs* and *SEMrush* have by far the highest levels of suggestions, followed by *Ubersuggest*, *Moz*, and *Google Keyword Planner* when comparing the overall median.
+
+* *Moz* returns always a maximum of 1,000 sugestions.
+
+* *KWFInder* never generates 1,000 suggestions or more.
+<br><br>
+
+#### Per Keyword Category:
+
+```{r 2-1-KWS-beeswarm-category-log, fig.width = 14, fig.height = 11}
+## with log scale
+df_kws %>% 
+  ggplot(aes(category_fct, suggested)) + 
+    stat_summary(fun.y = median, geom = "point", 
+                 size = 7, color = "grey70") +
+    geom_beeswarm(aes(color = tool), 
+                      alpha = .7, size = 1.5, cex = .7) +
+    coord_flip() +
+    scale_y_log10(labels = num_format) +
+    scale_color_carto_d(palette = "Prism", name = "SEO Tool:") +
+    guides(color = guide_legend(override.aes = list(size = 5))) +
+    labs(x = NULL, y = "Keyword Suggestions",
+         title = "**Each Search by Keyword Category**",
+         subtitle = "(cateogries ranked by overall median)") +
+    theme_flip + 
+    theme(axis.text.y = element_text(size = 15),
+          plot.margin = margin(r = 20))
+
+if(save == T){ ggsave(here("plots", "2_1_KWS_bees_category.png"), width = 14, height = 12, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* Plot highlights how skewed the data is in terms of keyword categories and SEO tools (with a focus on categories); the large grey dot indicates the median per category.
+
+* *Financial Services*, *Online Marketing*, and , *Women Fashion* generate the most suggestions (ranked 1, 2, and 3 on the y axis), followed by *Home Improvement*, *Wedding*, *Diet*, and *Gardening* when ranked by overall median.
+
+* The distinct number of 1,000 suggestion deliverd by *Moz* is clearly visible with a turquoise dotted line at that value.
+<br><br>
+
+
+## 2.2 Summary Plots of Distributions
+
+Distributions can be effectively summarized as box and whiskers plots which indicate the *median* (thick line), the *interquartile range* (box), the *minimum* and *maximum* excluding outliers (whiskers), and *outliers* (points):
+
+#### Box Plot per SEO Tool:
+
+```{r 2-2-KWS-boxplots-tool, fig.width = 14, fig.height = 11}
+df_kws %>% 
+  ggplot(aes(category_fct, suggested)) + 
+    geom_boxplot(aes(color = category_fct), outlier.size = 1) +
+    facet_wrap(~ tool, scales = "free_x", nrow = 3) +
+    coord_flip() +
+    scale_y_log10(labels = num_format, 
+                  limits = c(range_kw[1], range_kw[2] + 10000000)) +
+    scale_color_simpsons(guide = F) +
+    labs(x = NULL, y = "Keyword Suggestions",
+         title = "**Keyword Categories by SEO Tool**",
+         subtitle = "(categories ranked by overall median)") +
+    theme_flip +
+    theme_facet
+
+if(save == T){ ggsave(here::here("plots", "2_2_KWS_box_facet_tool.png"), width = 14, height = 11, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* Patterns among *Ahrefs*, *SEMrush*, *Sixtrix*, and *Ubersuggest* more or less the same.
+
+* *Google Keyword Planner*, *Moz*, *SECockpit*, *KeywordTool.io*, and *KWFinder* generate considerably less suggestions for most keyword categories.
+
+* *KWFinder* and *KeywordTool.io* show almost no variation (standard deviation of 98 and 335, respectively). 
+
+* *Moz* has no variation among keyword categories nor within each category (retunrs always 1,000 suggestions standard deviation of 0).
+
+* Interestingly, *Financial Services* does not score the most suggestions with *Google Keyword Planner*; *Women Fashion* and *Diet* have remarkably higher median values when compared to the other cateories (partly true for *SECockpit* as well).
+<br><br>
+
+#### Box Plot per Keyword Category:
+
+```{r 2-2-KWS-boxplots-cateogry, fig.width = 14, fig.height = 10}
+df_kws %>% 
+  ggplot(aes(tool_fct, suggested)) + 
+    geom_boxplot(aes(color = tool), outlier.size = 1) +
+    facet_wrap(~ category, scales = "free_x", ncol = 5) +
+    coord_flip() +
+    scale_y_log10(labels = num_format, 
+                  limits = c(range_kw[1], range_kw[2] + 10000000)) +
+    scale_color_carto_d(palette = "Prism", guide = F) +
+    labs(x = NULL, y = "Keyword Suggestions",
+         title = "**SEO Tool by Keyword Categories**",
+         subtitle = "(tools ranked by overall median)") +
+    theme_flip +
+    theme_facet
+
+if(save == T){ ggsave(here::here("plots", "2_2_KWS_box_facet_category.png"), width = 14, height = 10, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* *Ahrefs* and *SEMrush* are more competitive in the categories *Home Improvement*, *Online Marketing*, *Women Fashion*, *Legal*, *Automotive*, *Solar Energy*, *Vacations Travel*, and *Wedding* when compared tothe other SEO tools.
+
+* *Ahrefs* suggest notably more keywords in the categories *Office Supplies*, *Vacations Travel*, and *Web Hosting*
+
+* *Google Keyword Planner* and *Moz* reach comparable amounts of suggestions as the other tools only in the categories *Web Hosting* and *Office Supplies*.
+<br><br>
+
+
+The pattern might be easier to read as linerange plot by showing the *minimum-maximum range* (line) and the *median* (dot):
+
+#### Range Plot per SEO Tool:
+
+```{r 2-2-KWS-range-tool, fig.width = 14, fig.height = 11}
+df_kws %>% 
+  group_by(category, tool) %>% 
+  mutate(
+    min = min(suggested),
+    max = max(suggested)
+  ) %>% 
+  ungroup() %>% 
+  ggplot(aes(category_fct, suggested, color = category_fct)) + 
+    geom_linerange(aes(ymin = min, ymax = max)) +
+    stat_summary(fun.y = median, geom = "point", size = 3) +
+    facet_wrap(~ tool, scales = "free_x", nrow = 3) +
+    coord_flip() +
+    scale_y_log10(labels = num_format, 
+                  limits = c(range_kw[1], range_kw[2] + 10000000)) +
+    scale_color_simpsons(guide = F) +
+    labs(x = NULL, y = "Keyword Suggestions",
+         title = "**Keyword Categories by SEO Tool**",
+         subtitle = "(categories ranked by overall median)") +
+    theme_flip +
+    theme_facet
+
+if(save == T){ ggsave(here::here("plots", "2_2_KWS_range_facet_tool.png"), width = 14, height = 11, dpi = 300) }
+```
+<br>
+
+#### Range Plot per Keyword Category:
+
+```{r 2-2-KWS-range-category, fig.width = 14, fig.height = 10}
+df_kws %>% 
+  group_by(category, tool) %>% 
+  mutate(
+    min = min(suggested),
+    max = max(suggested)
+  ) %>% 
+  ungroup() %>% 
+  ggplot(aes(tool_fct, suggested, color = tool)) + 
+    geom_linerange(aes(ymin = min, ymax = max)) +
+    stat_summary(fun.y = median, geom = "point", size = 3) +
+    facet_wrap(~ category, scales = "free_x", ncol = 5) +
+    scale_y_log10(labels = num_format, 
+                  limits = c(range_kw[1], range_kw[2] + 10000000)) +
+    scale_color_carto_d(palette = "Prism", guide = F) +coord_flip() +
+    labs(x = NULL, y = "Keyword Suggestions",
+         title = "**Keyword Categories by SEO Tool**",
+         subtitle = "(tools ranked by overall median)") +
+    theme_flip +
+    theme_facet
+
+if(save == T){ ggsave(here::here("plots", "2_2_KWS_range_facet_category.png"), width = 14, height = 10, dpi = 300) }
+```
+<br><br>
+
+
+## 2.3 Keywords per Engine & Category
+
+In the following, we investigate the data in a more detailled manner: each keyword, encoded by SEO tool and keyword category.
+
+#### All 75 Keywords
+
+```{r 2-3-KWS-keyword-performance, fig.width = 12, fig.height = 25}
+df_kws %>% 
+  group_by(category, keyword) %>% 
+  mutate(sum = sum(suggested)) %>% 
+  ungroup() %>% 
+  ggplot(aes(fct_reorder(tool_fct, -tool_median), 
+             fct_reorder(keyword, sum), 
+             size = suggested, fill = category_fct)) +
+    geom_point(shape = 21, color = "grey20", stroke = .8) +
+    scale_x_discrete(position = "top") +
+    scale_y_discrete(expand = c(.01, .01)) +
+    scale_fill_simpsons(name = "Keyword Category:") +
+    scale_size(name = "Keyword Suggestions:", 
+               range = c(2, 10),
+               labels = num_format,
+               breaks = c(500, 5000, 50000, 500000, 5000000)) +
+    guides(
+      size = guide_legend(override.aes = list(fill = "grey70")),
+      fill = guide_legend(override.aes = list(size = 5), reverse = T)
+    ) +
+    labs(x = NULL, y = NULL,
+         title = "**Performance of All Keywords**",
+         subtitle = "(tool ranked by overall median, keywords ranked by total suggestions)\n") +
+    theme_facet +
+    theme(axis.line.x = element_blank(),
+          axis.text.x = element_text(size = 13, face = "bold", angle = 30, 
+                                     vjust = 0, hjust = 0),
+          axis.ticks.x = element_blank(),
+          axis.text.y = element_text(size = 12),
+          legend.key.height = unit(25, "pt"),
+          legend.position = c(1.2, .75),
+          plot.margin = margin(r = 200))
+
+if(save == T){ ggsave(here::here("plots", "2_3_KWS_keywords_tool.png"), width = 12, height = 25, dpi = 300) }
+```
+
+#### Top 25 Keywords
+
+```{r 2-3-KWS-keyword-performance-top-25, fig.width = 12, fig.height = 12}
+df_kws %>% 
+  group_by(category, keyword) %>% 
+  mutate(sum = sum(suggested)) %>% 
+  arrange(-sum) %>% 
+  group_by(tool) %>% 
+  mutate(rank = row_number()) %>% 
+  group_by(keyword) %>% 
+  mutate(rank = min(rank)) %>% 
+  ungroup() %>% 
+  filter(rank <= 25) %>% 
+  ggplot(aes(fct_reorder(tool_fct, -tool_median), 
+             fct_reorder(keyword, sum), 
+             size = suggested, fill = category_fct)) +
+    geom_point(shape = 21, color = "grey20", stroke = .8) +
+    scale_x_discrete(position = "top") +
+    scale_y_discrete(expand = c(.02, .02)) +
+    scale_fill_simpsons(name = "Keyword Category:", limits = levels(df_kws$category_fct)) +
+    scale_size(name = "Keyword Suggestions:", 
+               range = c(2, 10),
+               labels = num_format,
+               breaks = c(500, 5000, 50000, 500000, 5000000)) +
+    guides(
+      size = guide_legend(override.aes = list(fill = "grey70")),
+      fill = guide_legend(override.aes = list(size = 5), reverse = T)
+    ) +
+    labs(x = NULL, y = NULL,
+         title = "**Performance of Top 25 Keywords**",
+         subtitle = "(tool ranked by overall median, keywords ranked by total suggestions)\n") +
+    theme_facet +
+    theme(axis.line.x = element_blank(),
+          axis.text.x = element_text(size = 13, face = "bold", angle = 30, 
+                                     vjust = 0, hjust = 0),
+          axis.ticks.x = element_blank(),
+          axis.text.y = element_text(size = 12),
+          legend.key.height = unit(25, "pt"),
+          legend.position = c(1.2, .55),
+          plot.margin = margin(r = 200))
+
+if(save == T){ ggsave(here::here("plots", "2_3_KWS_keywords_tool_top.png"), width = 12, height = 12, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* No clear pattern of one keyword category dominating the top keywords.
+
+* Top 10 keywords belong to a variety of categories: *Financial Services*, *Women Fashion* (both with 3 out of 10), *Online Marketing*, *Home Improvement* *Diet*, and *Automotive* (each 1 out of 10).
+
+* *Ahrefs* and *SEMrush* have notably higher amounts of suggestions for most keywords when compared to the other three SEO tools (often 5 to 8 times more than *Ubersuggest* which is ranked 3rd).
+
+* Plot highlights the bias in keword suggestions with a few keywords gaining high numbers; while this shows how skewed the data is, it makes it difficult to compare the amount of suggestions among SEO tools within a particular keyword.
+
+* A visualization using a logarithmic scale for keyword suggestions might help here.
+<br><br>
+
+
+#### ... on a Logarithmic Scale
+
+```{r 2-3-KWS-keyword-performance-log, fig.width = 12, fig.height = 27}
+df_kws %>% 
+  group_by(category, keyword) %>% 
+  mutate(sum = sum(suggested)) %>% 
+  ungroup() %>% 
+  ggplot(aes(fct_reorder(tool_fct, -tool_median), 
+             fct_reorder(keyword, sum), 
+             size = log2(suggested), fill = category_fct)) +
+    geom_point(shape = 21, color = "grey20", stroke = .8) +
+    scale_x_discrete(position = "top") +
+    scale_y_discrete(expand = c(.01, .01)) +
+    scale_fill_simpsons(name = "Keyword Category:") +
+    scale_size(name = "Keyword Suggestions:", 
+               range = c(1, 10),
+               limits = c(log2(10), log2(10000000)),
+               labels = c("10", "100", "1,000", "100,000", "10,000,000"),
+               breaks = c(log2(10), log2(100), log2(1000), log2(100000), log2(10000000))) +
+    guides(
+      size = guide_legend(override.aes = list(fill = "grey70")),
+      fill = guide_legend(override.aes = list(size = 5), reverse = T)
+    ) +
+    labs(x = NULL, y = NULL,
+         title = "**Performance of All Keywords**",
+         subtitle = "(tool ranked by overall median, keywords ranked by total suggestions)\n") +
+    theme_facet +
+    theme(axis.line.x = element_blank(),
+          axis.text.x = element_text(size = 13, face = "bold", angle = 30, 
+                                     vjust = 0, hjust = 0),
+          axis.ticks.x = element_blank(),
+          axis.text.y = element_text(size = 12),
+          legend.key.height = unit(25, "pt"),
+          legend.position = c(1.3, .8),
+          plot.margin = margin(r = 200))
+
+if(save == T){ ggsave(here::here("plots", "2_3_KWS_keywords_tool_log.png"), width = 12, height = 27, dpi = 300) }
+```
+
+#### Top 25 Keywords
+
+```{r 2-3-KWS-keyword-performance-top-25-log, fig.width = 12, fig.height = 12}
+df_kws %>% 
+  group_by(category, keyword) %>% 
+  mutate(sum = sum(suggested)) %>% 
+  arrange(-sum) %>% 
+  group_by(tool) %>% 
+  mutate(rank = row_number()) %>% 
+  group_by(keyword) %>% 
+  mutate(rank = min(rank)) %>% 
+  ungroup() %>% 
+  filter(rank <= 25) %>% 
+  ggplot(aes(fct_reorder(tool_fct, -tool_median), 
+             fct_reorder(keyword, sum), 
+             size = log2(suggested), fill = category_fct)) +
+    geom_point(shape = 21, color = "grey20", stroke = .8) +
+    scale_x_discrete(position = "top") +
+    scale_y_discrete(expand = c(.02, .02)) +
+    scale_fill_simpsons(name = "Keyword Category:", limits = levels(df_kws$category_fct)) +
+    scale_size(name = "Keyword Suggestions:", 
+               range = c(1, 8),
+               limits = c(log2(100), log2(10000000)),
+               labels = c("100", "1,000", "100,000", "10,000,000"),
+               breaks = c(log2(100), log2(1000), log2(100000), log2(10000000))) +
+    guides(
+      size = guide_legend(override.aes = list(fill = "grey70")),
+      fill = guide_legend(override.aes = list(size = 5), reverse = T)
+    ) +
+    labs(x = NULL, y = NULL,
+         title = "**Performance of Top 25 Keywords**",
+         subtitle = "(tool ranked by overall median, keywords ranked by total suggestions)\n") +
+    theme_facet +
+    theme(axis.line.x = element_blank(),
+          axis.text.x = element_text(size = 13, face = "bold", angle = 30, 
+                                     vjust = 0, hjust = 0),
+          axis.ticks.x = element_blank(),
+          axis.text.y = element_text(size = 12),
+          legend.key.height = unit(25, "pt"),
+          legend.position = c(1.3, .55),
+          plot.margin = margin(r = 200))
+
+if(save == T){ ggsave(here::here("plots", "2_3_KWS_keywords_tool_top_log.png"), width = 12, height = 12, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* It is immediately apparent that *Ahrefs* and *SEMrush* have by far the most suggestions in comparison to *Ubersuggest*, *Moz*, and *Google Keyword Planner*.
+
+* However, the skewed distribution among keywords within SEO tools is masked.
+
+
+***
+
+## General Notes
+
+* Multiples could be ordered by ranking of SEO tools (currently as in csv) and/or keyword categories (curently alphabetic) as well.
+
+* Median values and/or ranking could be replaced by mean (note: mean may differ between linear and logarithmic scale)
+<br><br>
+
+***
+
+
+# 3 Keyword Search Volume
+
+```{r 3-VOL-data}
+df_vol <-
+  df_tools %>% 
+  dplyr::select(tool, keyword, volume, volume_cat) %>% 
+  unique() %>% 
+  filter(!is.na(volume)) %>% 
+  group_by(tool) %>% 
+  mutate(tool_median = median(volume)) %>% 
+  ungroup() %>% 
+  mutate(tool_fct = fct_reorder(tool, tool_median))
+
+## range of volume
+range_vol <- range(df_vol$volume)
+```
+
+## 3.1 Distribution of Keyword Search Volume
+
+```{r 3-1-VOL-boxplots-tool, fig.width = 14, fig.height = 9}
+df_vol %>% 
+  ggplot(aes(tool_fct, volume, 
+             color = tool)) + 
+    geom_violin(aes(fill = tool), 
+                size = .6, alpha = .2, 
+                width = 1.05, trim = F) +
+    geom_boxplot(size = .6, width = .15, 
+                 coef = 0, outlier.color = NA) +
+    coord_flip() +
+    scale_y_log10(labels = num_format, 
+                  limits = c(2, range_vol[2]),
+                  expand = c(.03, .03)) +
+    scale_color_carto_d(palette = "Bold", guide = F) +
+    scale_fill_carto_d(palette = "Bold", guide = F) +
+    labs(x = NULL, y = "Search Volume",
+         title = "**Search Volumes by SEO Tool**",
+         subtitle = "(tools ranked by overall median)") +
+    theme_flip +
+    theme(#axis.title.x = element_text(size = 16),
+          axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 16))
+
+if(save == T){ ggsave(here::here("plots", "3_1_VOL_box_violin_tool.png"), width = 14, height = 9, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* Distributions of search volume are similar for most SEO tools; *Sixtrix* and *Moz* seem to have certain search volumes that are overrepresented.
+
+* *KeywordTool.io* reaches the highest values of search volumes (12M, 2.8 as high as the overall median) while *Sixtrix* has by far the highest median (10,000, 277.8% of the overall median of 3,600).
+
+* Median search volumes by *KeywordTool.io* (4,400), *SECockpit*, *LongtailPro*, *SEMrush*, *Google Keyword Planner* (all 3,600), and *KWfinder* (3,500) are all quite similar.
+
+* *Moz* (2,300 - 63.9% of the overall median) and *Ahrefs* (1,900 - 52.8% of the overall median) have slightly lower overall search volumes.
+<br><br>
+
+
+## 3.2 Distributions per Volume Category
+
+```{r 3-2-VOL-boxplots-tool-categories, fig.width = 14, fig.height = 8}
+df_vol %>%
+  filter(volume_cat != "0-100") %>% 
+  ggplot(aes(tool_fct, volume, 
+             color = tool,)) + 
+    geom_violin(aes(fill = tool),
+                size = .6, alpha = .2,
+                width = 1.15, trim = F) +
+    geom_boxplot(size = .6, width = .15, alpha = .5,
+                 coef = 0, outlier.color = NA) +
+    facet_wrap(~ volume_cat, scales = "free_x") +
+    coord_flip() +
+    scale_y_log10(labels = num_format,
+                  breaks = c(100, 300, 1000, 3000, 10000, 100000, 1000000),
+                  expand = c(.03, .03)) +
+    scale_color_carto_d(palette = "Bold", guide = F) +
+    scale_fill_carto_d(palette = "Bold", guide = F) +
+    labs(x = NULL, y = "Search Volume",
+         title = "**Search Volumes by SEO Tool and Volume Category**",
+         subtitle = "(tools ranked by overall median)") +
+    theme_flip +
+    theme_facet + 
+    theme(axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 14, face = "bold"),
+          panel.spacing.x = unit(2, "lines"),
+          strip.text = element_text(size = 15, margin = margin(t = 20, b = 20)))
+
+if(save == T){ ggsave(here::here("plots", "3_2_VOL_box_violin_tool_facet.png"), width = 14, height = 8, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* Trends are the same when looking at different search volumes by category.
+<br><br>
+
+## 3.3 Comparison of Keyword Search Volumes to *Google Keyword Planner*
+
+```{r 3-3-VOL-lollipops-engine-categories, fig.width = 14, fig.height = 5}
+df_tools_ref <-
+  df_tools_long %>% 
+  filter(
+    tool == "Google Keyword Planner",
+    volume_cat != "0-100"
+  ) %>% 
+  group_by(category, volume_cat) %>% 
+  summarize(ref = mean(value, na.rm = T)) %>% 
+  left_join(filter(df_tools_long, tool != "Google Keyword Planner")) %>% 
+  group_by(tool, category, volume_cat) %>% 
+  summarize(difference = mean(value, na.rm = T) - unique(ref)) %>% 
+ungroup() %>% 
+  filter(!is.na(difference))
+
+df_tools_ref %>% 
+  filter(
+    category == "volume",
+    volume_cat != "0-100"
+  ) %>% 
+  mutate(
+    tool_fct = fct_reorder(tool, difference),
+    pos_r = if_else(difference >= 0, difference, NA_real_),
+    pos_l = if_else(difference < 0, difference, NA_real_)
+  ) %>% 
+  ggplot(aes(tool_fct, difference, 
+             color = tool)) + 
+    geom_segment(aes(x = tool_fct, xend = tool_fct, 
+                     y = 0, yend = difference),
+                 size = 1.5) +
+    geom_hline(yintercept = 0, color = "grey70", size = .9) +
+    geom_point(size = 5) +
+    geom_text(aes(tool_fct, pos_r, label = tool_fct), 
+              hjust = 0, nudge_y = 1400,
+              family = "Montserrat", 
+              fontface = "bold", size = 4.2) +
+    geom_text(aes(tool_fct, pos_l, label = tool_fct), 
+              hjust = 1,  nudge_y = -1400,
+              family = "Montserrat", 
+              fontface = "bold", size = 4.2) +
+    facet_wrap(~ volume_cat) +
+    coord_flip() +
+    scale_y_continuous(labels = num_format,
+                       limits = c(-7000, 30000),
+                       expand = c(.3, .3)) +
+    scale_color_carto_d(palette = "Bold", 
+                        limits = levels(df_tools$tool),
+                        guide = F) +
+    scale_fill_carto_d(palette = "Bold", 
+                       limits = levels(df_tools$tool),
+                       guide = F) +
+    labs(x = NULL, y = "Difference in Average Search Volume",
+         title = "**Comparison of Average Search Volume to Google Keyword Planner**",
+         subtitle = "(tools ranked by overall median, subsetted by volume category)") +
+    theme_flip + 
+    theme_lolli +
+    theme(panel.spacing = unit(2, "lines"),
+          strip.text = element_text(size = 15, face = "bold", margin = margin(t = 20, b = 20)))
+
+if(save == T){ ggsave(here::here("plots", "3_3_VOL_lollipops_avg_diff_cat.png"), width = 14, height = 5, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* Largest differences in search volumes are found in the highest category (10,000+) with *KeywordTool.io* and *Sixtrix* delivering remarkably higher volumes (19,310 and 15,547 more than *Google Keyword Planner*).
+<br><br>
+
+* *Ahrefs* and *KWFinder* generate always less search volume than *Google Keyword Planner* (a maximum difference of -2,170 and -1,783 in volume category 10,000+)
+
+
+## 3.4 Top Keywords per SEO Tool
+
+```{r 3-4-VOL-heatmap-tools-top-keywords, fig.width = 14, fig.height = 8}
+df_keywords_top <-
+  df_tools_long %>%
+  group_by(tool, category) %>% 
+  arrange(-value) %>% 
+  mutate(
+    rank = row_number(),
+    max_rank = max(rank)
+  ) %>% 
+  filter(rank <= 10) %>% 
+  ungroup()
+
+theme_heat <-
+  theme(axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.text.x = element_text(size = 12, angle = 30, 
+                                   vjust = 0, hjust = 0),
+        axis.text.y = element_text(size = 11, hjust = 0),
+        axis.ticks = element_blank(),
+        plot.margin = margin(5.5, 22, 5.5, 5.5))
+
+## heatmap top volume
+df_keywords_top %>% 
+  filter(
+    category == "volume",
+    !is.na(value)
+  ) %>% 
+  mutate(
+    mio = round(value / 1000000, 2),
+    value_log = log10(value),
+    font_col = if_else(value <= max(value) - ((max(value) - min(value)) / 2), "light", "dark"),
+    label = glue::glue("{str_wrap(keyword, 15)}\n{mio}M")
+  ) %>% 
+  #mutate(keyword = fct_reorder(keyword, desc(rank_total))) %>% 
+  ggplot(aes(tool, rank, fill = value_log, label = label)) +
+    geom_tile(color = "white", size = .5) +
+    geom_text(aes(color = font_col),
+              family = "Montserrat", fontface = "bold", 
+              size = 3.3, lineheight = .95) +
+    scale_x_discrete(expand = c(0, 0), position = "top") +
+    scale_y_reverse(expand = c(0, 0), breaks = 1:10, 
+                    labels = glue::glue("Rank {1:10}" )) +
+    scale_color_manual(values = c('dark' = 'black', 'light' = 'white'), 
+                       guide = F) +
+    scico::scale_fill_scico(palette = "lapaz", guide = F) +
+    labs(x = NULL, y = NULL,
+         title = "**Top 10 Keywords of Each SEO Tool** (with Regard to Search Volume)") +
+    theme_heat
+
+if(save == T){ ggsave(here::here("plots", "3_4_VOL_heatmap_keywords_top.png"), width = 14, height = 8, dpi = 300) }
+```
+
+
+```{r 3-4-VOL-heatmap-tools-top-keywords-wop, fig.width = 14, fig.height = 8, include = F}
+## WORK IN PROGRESS
+df_tools_cat <-
+  df_tools %>% 
+  left_join(df_cat_join) %>% 
+  dplyr::select(tool, keyword, keyword_cat, volume, volume_cat) %>% 
+  filter(!is.na(volume)) %>% 
+  group_by(tool) %>% 
+  mutate(tool_median = median(volume)) %>% 
+  ungroup() %>% 
+  mutate(tool_fct = fct_reorder(tool, tool_median))
+
+df_vol_extreme <-
+  df_tools_cat %>%
+  group_by(keyword) %>% 
+  summarize(var = var(volume)) %>% 
+  arrange(-var) %>% 
+  mutate(rank = row_number()) %>% 
+  filter(rank <= 25)
+
+## heatmap top volume
+df_tools_cat %>% 
+  inner_join(df_vol_extreme) %>% 
+  mutate(
+    mio = round(volume / 1000000, 3),
+    volume_log = log10(volume),
+    font_col = if_else(volume <= max(volume) - ((max(volume) - min(volume)) / 2), "light", "dark"),
+    label = glue::glue("{mio}M")
+  ) %>% 
+  mutate(keyword = fct_reorder(keyword, desc(rank))) %>% 
+  ggplot(aes(tool, keyword, fill = volume, label = label)) +
+    geom_tile(color = "white", size = .5) +
+    geom_text(aes(color = font_col),
+              family = "Montserrat", 
+              size = 1.6, lineheight = .95) +
+    scale_x_discrete(expand = c(0, 0), position = "top") +
+    scale_color_manual(values = c('dark' = 'black', 'light' = 'white'), 
+                       guide = F) +
+    scico::scale_fill_scico(palette = "lapaz", guide = F) +
+    labs(x = NULL, y = NULL,
+         title = "**Keywords with Greatest Discrepancy in Search Volume**") +
+    theme_heat + theme(panel.grid.major.y = element_blank())
+
+if(save == T){ ggsave(here::here("plots", "3_4_VOL_heatmap_keywords_extreme.png"), width = 7, height = 8, dpi = 300) }
+
+
+
+
+
+
+
+df_vol_extreme <-
+  df_tools_cat %>%
+  group_by(keyword, keyword_cat) %>% 
+  summarize(var = var(volume)) %>% 
+  group_by(keyword_cat) %>% 
+  top_n(10, var)
+
+df_tools_cat
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* Most top keywords are requests related to financial services. 
+
+* *KeywordTool.io* has by far the highest search volumes per top keyword (6.12M for the top keyword); *Sixtrix* by far the lowest volumes (0.25M for all top keywords).
+<br><br>
+
+
+## 3.5 Keywords by Length
+
+```{r 3-5-VOL-length-tool, fig.width = 14, fig.height = 11}
+df_vol %>% 
+  mutate(length = nchar(keyword)) %>% 
+  ggplot(aes(length, volume, color = tool, fill = tool)) +
+    geom_jitter(width = .2, alpha = .1, size = .5) +
+    geom_smooth(method = "lm", color = "grey7", size = .4, alpha = .4) +
+    facet_wrap(~ tool, scales = "free_x", nrow = 3) +
+    scale_x_continuous(limits = c(1, 60)) +
+    scale_y_log10(labels = num_format, expand = c(.1, .1)) +
+    scale_color_carto_d(palette = "Bold", guide = F) +
+    scale_fill_carto_d(palette = "Bold", guide = F) +
+    labs(x = "Number of Keyword Characters", 
+         y = "Keyword Search Volume",
+         title = "**Search Volume in Relation to Keyword Length per SEO Tool**") +
+    theme_facet +
+    theme(panel.grid.major.y = element_line(size = .25))
+
+if(save == T){ ggsave(here::here("plots", "3_5_VOL_length_tool_lm.png"), width = 14, height = 11, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* In general, all 9 SEO tools show a siginificant negative correlation if searhc volume and keyword lenght: the more characters the lower the search volume (volume = 10^(4.3739 + (-0.049) * length)),
+
+* For example, using *Google Keyword Planner*, searching for a keyword with 20 characters reduces the search volume by 5,177 in comparison to a search with 10 characters. 
+<br><br>
+
+***
+
+
+# 4 Keyword Difficulty Scores
+
+```{r 4-DIF-data}
+df_diff <-
+  df_tools %>% 
+  dplyr::select(tool, keyword, diff, volume_cat) %>% 
+  filter(!is.na(diff)) %>% 
+  group_by(tool) %>% 
+  mutate(tool_median = median(diff)) %>% 
+  ungroup() %>% 
+  mutate(tool_fct = fct_reorder(tool, tool_median))
+
+## range of difficulty
+range_diff <- range(df_diff$diff)
+```
+
+
+## 4.1 Distribution of Difficulty Scores
+
+```{r 4-1-DIF-boxplots-tool, fig.width = 14, fig.height = 8}
+df_diff %>% 
+  ggplot(aes(tool_fct, diff, 
+             color = tool)) + 
+    #geom_violin(aes(fill = tool), 
+    #            alpha = .3, width = 1.4, trim = F) +
+    #geom_boxplot(width = .1, coef = 0, outlier.color = NA) +
+    geom_boxplot(width = .7, size = 1, alpha = .3, outlier.size = .8) +
+    coord_flip() +
+    scale_y_log10(labels = num_format, 
+                  limits = c(.9, range_diff[2])) +
+    scale_color_carto_d(palette = "Bold", guide = F, 
+                       limits = levels(df_tools$tool)) +
+    scale_fill_carto_d(palette = "Bold", guide = F, 
+                       limits = levels(df_tools$tool)) +
+    labs(x = NULL, y = "Difficulty Score",
+         title = "**Difficulty Scores  by SEO Tool**",
+         subtitle = "(tools ranked by overall median)") +
+    theme_flip +
+    theme(axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 16))
+
+if(save == T){ ggsave(here::here("plots", "4_1_DIF_box_tool.png"), width = 14, height = 8, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* Difficulty scores a notably lower for *Ahrefs* () and *SECockpit* (median of 16 and 7.76 and interquartile ranges of 5.6-36 and 5-11.2, respectively). 
+
+* *SEMrush* and *KeywordTool.io* report the highest overall difficulty scores (median of 84 and 77 and interquartile ranges of 77.4-88 and 88-100, respectively).
+
+* *Sixtrix*, *Moz*, *LongtailPro*, and *KWFinder* show similar distributions of difficulty scores (medians of 50, 43, 41, and 38, respectively).
+<br><br>
+
+
+## 4.2 Distributions of Difficulty Scores by Volume Categories
+
+```{r 4-1-DIF-boxplots-tool-categories, fig.width = 14, fig.height = 7}
+df_diff %>% 
+  filter(volume_cat != "0-100") %>% 
+  ggplot(aes(tool_fct, diff, 
+             color = tool)) + 
+    #geom_violin(aes(fill = tool), 
+    #            alpha = .3, width = 1.4, trim = F) +
+    #geom_boxplot(width = .1, coef = 0, outlier.color = NA) +
+    geom_boxplot(width = .7, size = 1, alpha = .3, outlier.size = .8) +
+    facet_wrap(~ volume_cat) + 
+    coord_flip() +
+    scale_y_log10(labels = num_format, 
+                  limits = c(.9, range_diff[2])) +
+    scale_color_carto_d(palette = "Bold", guide = F, 
+                       limits = levels(df_tools$tool)) +
+    scale_fill_carto_d(palette = "Bold", guide = F, 
+                       limits = levels(df_tools$tool)) +
+    labs(x = NULL, y = "Difficulty Score",
+         title = "**Difficulty Scores  by SEO Tool and Volume Category**",
+         subtitle = "(tools ranked by overall median)") +
+    theme_flip +
+    theme_facet + 
+    theme(axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 14, face = "bold"),
+          panel.spacing.x = unit(2, "lines"),
+          strip.text = element_text(size = 15, margin = margin(t = 20, b = 20)))
+
+if(save == T){ ggsave(here::here("plots", "4_2_DIF_box_tool_cat.png"), width = 14, height = 7, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* The pattern is similar when looking at the distributions of difficulty scores per volume category.
+
+* *SECockpit* reports remarkably lower difficulty scores in comparison to the other SEO tools in case (e.g. median of 9.91 versus medians from 36 to 86.6 in case of *10,000+*).
+
+* Low and meidum search volume gain lower difficulty scores than high search volumes when using *Ahrefs* as SEO tool (12 for *100-1,000*, 16 for *1,000-10,000*, and 36 for *10,000+*).
+<br><br>
+
+## 4.3  Top Keywords per SEO Tool
+
+```{r 4-3-DIF-heatmap-tools-top-keywords, fig.width = 14, fig.height = 8}
+## heatmap top difficulty
+df_keywords_top %>% 
+  filter(
+    category == "diff",
+    !is.na(value)
+  ) %>% 
+  mutate(
+    value_log = log10(value),
+    font_col = if_else(value <= max(value) - ((max(value) - min(value)) / 2), "light", "dark"),
+    label = glue::glue("{str_wrap(keyword, 20)}\n{round(value, 1)}%")
+  ) %>% 
+  ggplot(aes(tool, rank, fill = value_log, label = label)) +
+    geom_tile(color = "white", size = .5) +
+    geom_text(aes(color = font_col),
+              family = "Montserrat", fontface = "bold", 
+              size = 3.1, lineheight = .95) +
+    scale_x_discrete(expand = c(0, 0), position = "top") +
+    scale_y_reverse(expand = c(0, 0), breaks = 1:10, 
+                    labels = glue::glue("Rank {1:10}" )) +
+    scale_color_manual(values = c('dark' = 'black', 'light' = 'white'), 
+                       guide = F) +
+    scico::scale_fill_scico(palette = "lapaz", guide = F) +
+    labs(x = NULL, y = NULL,
+         title = "**Top 10 Keywords of Each SEO Tool** (with Regard to Difficulty Scores)") +
+    theme_heat
+
+if(save == T){ ggsave(here::here("plots", "4_3_DIF_heatmap_keywords_top.png"), width = 14, height = 8, dpi = 300) }
+
+# ## heatmap bottom volume
+# df_keywords_top %>% 
+#   filter(category == "volume", rank < 0) %>% 
+#   mutate(
+#     value = log10(value),
+#     max = max(value, na.rm = T),
+#     min = min(value, na.rm = T),
+#     font_col = if_else(value <= max(value) - ((max(value) - min(value)) / 2), "light", "dark"),
+#     label = glue::glue("<b>{keyword}</b><br><span style='font-size:9pt'>{round(value, 2)}M</span>")
+#   ) %>% 
+#   #mutate(keyword = fct_reorder(keyword, desc(rank_total))) %>% 
+#   ggplot(aes(tool, rank, fill = value, label = str_wrap(label))) +
+#     geom_tile(color = "white", size = 0.5) +
+#     geom_richtext(aes(color = font_col),
+#                   family = "Montserrat", size = 3,
+#                   fill = NA, label.color = NA) +
+#     scale_x_discrete(expand = c(0, 0), position = "top") +
+#     scale_y_continuous(expand = c(0, 0), breaks = -1:-10, 
+#                     labels = glue::glue("Rank {1:10}")) +
+#     scale_color_manual(values = c('dark' = 'black', 'light' = 'white'), 
+#                        guide = F) +
+#     scico::scale_fill_scico(palette = "turku", guide = F) +
+#     labs(x = NULL, y = NULL) +
+#     theme_heat
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* Variety of top keywords is remarkably higher with regard to difficulty scores than with regard to search volumes. 
+
+* In general, *Ahrefs*, *SEMrush*, and *KeywordTool.io* score the highest difficulties (99%, 99.8%, and 100%, respectively for the top keyword with regard to difficulty) while those provided by *SECockpit* are the lowest for most of the top keywords (58.2-76.1% for keywords ranked 2 to 10).
+<br><br>
+
+
+# 5 Cost per Click (CPC)
+
+```{r 5-CPC-data}
+df_cpc <-
+  df_tools %>% 
+  dplyr::select(tool, keyword, cpc, volume_cat) %>% 
+  unique() %>% 
+  filter(!is.na(cpc)) %>% 
+  group_by(tool) %>% 
+  mutate(tool_median = median(cpc)) %>% 
+  ungroup() %>% 
+  mutate(tool_fct = fct_reorder(tool, tool_median))
+
+## range of cpc
+range_cpc <- range(df_cpc$cpc)
+```
+
+## 5.1 Distribution of CPC per SEO Tool
+
+```{r 5-1-CPC-histogram-tool-log, fig.width = 14, fig.height = 7}
+df_cpc %>% 
+  ggplot(aes(cpc)) +
+    geom_histogram(aes(color = tool, fill = tool), binwidth = .2) +
+    facet_wrap(~ tool, scales = "free_x", nrow = 2) +
+    coord_cartesian(xlim = c(.005, range_cpc[2] + 500)) +
+    scale_x_log10(labels = num_format) +
+    scale_color_carto_d(palette = "Bold", guide = F, 
+                        limits = levels(df_tools$tool)) +
+    scale_fill_carto_d(palette = "Bold", guide = F, 
+                       limits = levels(df_tools$tool)) +
+    labs(x = "CPC", y = "Count",
+         title = "**Distribution of Cost per Click (CPC) by SEO Tool**") +
+    theme_facet +
+    theme(panel.grid.major.y = element_line(size = .25),
+          axis.text.x = element_text(size = 8))
+
+if(save == T){ ggsave(here::here("plots", "5_1_CPC_histo_log_tool.png"), width = 14, height = 7, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* Interestingly, histograms indicate nearly identical distributions for *Google Keyword Planner*, *SEMrush*, and *SECockpit* as well as for *KeywordTool.io*, *KWFinder*, and *LongtailPro*.
+
+* *Sixtrix* shows the same unimodal distribution but has far less successful search requests (2,347 versus above 9,000 for all other tools).
+<br><br>
+
+```{r 5-1-CPC-boxplots-tool, fig.width = 14, fig.height = 9}
+df_cpc %>% 
+  ggplot(aes(tool_fct, cpc, 
+             color = tool)) + 
+    #geom_violin(aes(fill = tool), 
+    #            alpha = .3, width = 1.5, trim = F) +
+    #geom_boxplot(width = .1, coef = 0, outlier.color = NA) +
+    geom_boxplot(width = .7, size = 1, alpha = .3, outlier.size = .8) +
+    coord_flip() +
+    scale_y_log10(labels = num_format, 
+                  limits = c(.01, range_cpc[2])) +
+    scale_color_carto_d(palette = "Bold", guide = F, 
+                        limits = levels(df_tools$tool)) +
+    scale_fill_carto_d(palette = "Bold", guide = F, 
+                       limits = levels(df_tools$tool)) +
+    labs(x = NULL, y = "CPC",
+         title = "**Cost per Click (CPC) by SEO Tool**",
+         subtitle = "(tools ranked by overall median)") +
+    theme_flip +
+    theme(axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 16))
+
+if(save == T){ ggsave(here::here("plots", "5_1_CPC_box_tool.png"), width = 14, height = 9, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* Distributions of cost per click (CPC) are very similar among SEO tools.
+
+* *SECockpit* and *Google Keyword Planner* report slighly higher overall costs than the other SEO tools.
+
+* *SEMrush* gains the lowest cost per click.
+<br><br>
+
+
+## 5.2 Distributions of CPC per Volume Category
+
+```{r 5-2-CPC-boxplots-tool-cateogies, fig.width = 14, fig.height = 8}
+df_cpc %>% 
+  filter(volume_cat != "0-100") %>% 
+  ggplot(aes(tool_fct, cpc, 
+             color = tool)) + 
+    #geom_violin(aes(fill = tool), 
+    #            alpha = .3, width = 1.5, trim = F) +
+    #geom_boxplot(width = .1, coef = 0, outlier.color = NA) +
+    geom_boxplot(width = .7, size = 1, alpha = .3, outlier.size = .8) +
+    facet_wrap(~ volume_cat) +
+    coord_flip() +
+    scale_y_log10(labels = num_format, 
+                  limits = c(.01, range_cpc[2] + 500)) +
+    scale_color_carto_d(palette = "Bold", guide = F, 
+                        limits = levels(df_tools$tool)) +
+    scale_fill_carto_d(palette = "Bold", guide = F, 
+                       limits = levels(df_tools$tool)) +
+    labs(x = NULL, y = "CPC",
+         title = "**Cost per Click (CPC) by SEO Tool and Volume Category**",
+         subtitle = "(tools ranked by overall median)") +
+    theme_flip +
+    theme_facet + 
+    theme(axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 14, face = "bold"),
+          panel.spacing.x = unit(2, "lines"),
+          strip.text = element_text(size = 15, margin = margin(t = 20, b = 20)))
+
+if(save == T){ ggsave(here::here("plots", "5_2_CPC_box_tool_cat.png"), width = 14, height = 8, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* Patterns are almost the same independent from SEO tool and volume category.
+<br><br>
+
+
+## 5.3 Comparison of Keyword Search Volumes to *Google Keyword Planner*
+
+```{r 5-3-VOL-lollipops-engine-categories, fig.width = 14, fig.height = 8}
+df_tools_ref %>% 
+  filter(
+    category == "cpc",
+    volume_cat != "0-100"
+  ) %>% 
+  mutate(
+    tool_fct = fct_reorder(tool, difference),
+    pos_r = if_else(difference >= 0, difference, NA_real_),
+    pos_l = if_else(difference < 0, difference, NA_real_)
+  ) %>% 
+  ggplot(aes(tool_fct, difference, 
+             color = tool)) + 
+    geom_segment(aes(x = tool_fct, xend = tool_fct, 
+                     y = 0, yend = difference),
+                 size = 1.5) +
+    geom_hline(yintercept = 0, color = "grey70", size = .9) +
+    geom_point(size = 5) +
+    geom_text(aes(tool_fct, pos_r, label = tool_fct), 
+              hjust = 0, nudge_y = .15,
+              family = "Montserrat", 
+              fontface = "bold", size = 4.2) +
+    geom_text(aes(tool_fct, pos_l, label = tool_fct), 
+              hjust = 1,  nudge_y = -.15,
+              family = "Montserrat", 
+              fontface = "bold", size = 4.2) +
+    facet_wrap(~ volume_cat) +
+    coord_flip() +
+    scale_y_continuous(labels = num_format,
+                       limits = c(-2.5, 1),
+                       expand = c(.2, .2)) +
+    scale_color_carto_d(palette = "Bold", 
+                        limits = levels(df_tools$tool),
+                        guide = F) +
+    scale_fill_carto_d(palette = "Bold", 
+                       limits = levels(df_tools$tool),
+                       guide = F) +
+    labs(x = NULL, y = "Difference in Average Cost per Click (CPC)",
+         title = "**Comparison of Average Cost per Click (CPC) to Google Keyword Planner**",
+         subtitle = "(tools ranked by overall median, subsetted by volume category)") +
+    theme_flip + 
+    theme_lolli +
+    theme(panel.spacing = unit(2, "lines"),
+          strip.text = element_text(size = 15, face = "bold", margin = margin(t = 20, b = 20)))
+
+if(save == T){ ggsave(here::here("plots", "5_3_CPC_lollipops_avg_diff_cat.png"), width = 14, height = 5, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* *SECockpit* always has higher average cost per click than *Google Keyword Planner*, independent of search volume cateogry.
+
+* *Sixtrix* reports higher cost per click in case of low search volumes (100-1,000).
+
+* *KWFinder*, *LogntailPro*, *KeywordTool.io*, *Ahrefs*, and *SEMrush* always have lower average cost per clicks than *Google Keyword Planner*.
+<br><br>
+
+## 5.4  Top Keywords per SEO Tool
+
+```{r 5-4-CPC-heatmap-tools-top-keywords, fig.width = 14, fig.height = 8}
+## heatmap top difficulty
+df_keywords_top %>% 
+  filter(
+    category == "cpc",
+    !is.na(value)
+  ) %>% 
+  mutate(
+    value_log = log10(value),
+    font_col = if_else(value <= max(value) - ((max(value) - min(value)) / 2), "light", "dark"),
+    label = glue::glue("{str_wrap(keyword, 18)}\n${round(value, 0)}")
+  ) %>% 
+  ggplot(aes(tool, rank, fill = value_log, label = label)) +
+    geom_tile(color = "white", size = .5) +
+    geom_text(aes(color = font_col),
+              family = "Montserrat", fontface = "bold", 
+              size = 3.3, lineheight = .95) +
+    scale_x_discrete(expand = c(0, 0), position = "top") +
+    scale_y_reverse(expand = c(0, 0), breaks = 1:10, 
+                    labels = glue::glue("Rank {1:10}" )) +
+    scale_color_manual(values = c('dark' = 'black', 'light' = 'white'), guide = F) +
+    scico::scale_fill_scico(palette = "lapaz", guide = F) +
+    labs(x = NULL, y = NULL,
+         title = "**Top 10 Keywords of Each SEO Tool** (with regard to Cost per Click)") +
+    theme_heat
+
+if(save == T){ ggsave(here::here("plots", "5_4_CPC_heatmap_keywords_top.png"), width = 14, height = 8, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+*Google Keyword Planner* and *SECockpit* have the keywords with the y far highest ost per click with more than $500.
+
+* *Sixtrix* reports the overall lowest cost per click for the top keywords.
+<br><br>
+
+
+# 6. Performance in Volume, Difficulty & CPC
+
+## 6.1 Heatmap of Performance by SEO Tool
+
+```{r 6-1-ALL-heatmap-tool, fig.width = 10, fig.height = 5.7}
+df_tools_long %>% 
+  left_join(df_cat_join) %>% 
+  filter(!is.na(keyword_cat)) %>% 
+  group_by(category) %>% 
+  mutate(avg = mean(value, na.rm = T)) %>% 
+  group_by(tool, category) %>% 
+  summarize(
+    comp = mean(value, na.rm = T) / unique(avg),
+    log_avg = log2(comp)
+  ) %>% 
+  ggplot(aes(tool, category, fill = log_avg)) +
+    geom_tile(color = "white", size = 0.8) +
+    coord_equal() +
+    scale_x_discrete(position = "top", 
+                     expand = c(0, 0)) +
+    scale_y_discrete(labels = c("Cost per Click (CPC)", "Difficulty Scores", "Search Volume"),
+                     expand = c(0, 0)) +
+    scico::scale_fill_scico(palette = "cork",
+                            name = "Difference to Overall Average",
+                            limits = c(-1.2, 1.2),
+                            breaks = seq(-1, 1, by = 1),
+                            labels = c("50%", "100%", "200%")) +
+    labs(x = NULL, y = NULL,
+         title = "**Comparison of Performance in Volume, Difficulty & CPC**<br>") +
+    guides(fill = guide_colorbar(barheight = unit(3, units = "mm"),  
+                                 barwidth = unit(100, units = "mm"),
+                                 direction = "horizontal",
+                                 ticks.colour = "white",
+                                 title.position = "top",
+                                 title.hjust = 0.5)) +
+    theme(axis.line.x = element_blank(),
+          axis.line.y = element_blank(),
+          axis.text.x = element_text(size = 12, face = "bold", angle = 30, 
+                                     vjust = 0, hjust = 0),
+          axis.text.y = element_text(size = 12, face = "bold"),
+          axis.ticks = element_blank(), 
+          legend.position = "bottom",
+          legend.title = element_text(size = 11),
+          legend.text = element_text(size = 9),
+          plot.margin = margin(5.5, 22, 5.5, 5.5))
+
+if(save == T){ ggsave(here::here("plots", "6_1_ALL_heatmap_tool.png"), width = 10, height = 5.7, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* Largest discrepancies in overall performance can be found for 
+  - *Ahrefs* (considerably lower search volumes and difficulty scores)
+  - *SEMrush* (considerably higher difficulty scores)
+  - *Sixtrix* (considerably higher search volumes)
+  - *KeywordTool.io* (slightly higher search volumes and difficulty scores)
+  
+* No data was available in case of
+  - Difficulty scores for *Google Keyword Planner* and *SECockpit*
+  - Cost per click for *Moz
+<br><br>
+
+```{r 6-1-ALL-heatmap-tool-cat-avg, fig.width = 10, fig.height = 16}
+df_tools_long %>% 
+  left_join(df_cat_join) %>% 
+  filter(!is.na(keyword_cat)) %>% 
+  group_by(category) %>% 
+  mutate(avg = mean(value, na.rm = T)) %>% 
+  group_by(tool, category, keyword_cat) %>% 
+  summarize(
+    comp = mean(value, na.rm = T) / unique(avg),
+    log_avg = log2(comp)
+  ) %>% 
+  ungroup() %>% 
+  mutate(
+    label = if_else(is.na(comp), glue::glue(""), glue::glue("{round(comp * 100, 0)}%")),
+    category = factor(category, 
+                      levels = c("volume", "diff", "cpc"),
+                      labels = c("Keyword Search Volume", 
+                                 "Difficulty Scores", 
+                                 "Cost per Click (CPC)"))
+  ) %>% 
+  ggplot(aes(keyword_cat, tool, fill = log_avg)) +
+    geom_tile(color = "white", size = 0.8) +
+    geom_text(aes(label = label),
+                  family = "Montserrat", size = 2.2, 
+              fontface = "bold", color = "white") +
+    facet_wrap(~ category, ncol = 1) +
+    coord_equal() +
+    scale_x_discrete(expand = c(0, 0)) +
+    scale_y_discrete(expand = c(0, 0)) +
+    scico::scale_fill_scico(palette = "cork",
+                            name = "Difference to Overall Average",
+                            limits = c(-3.4, 3.4),
+                            breaks = seq(-3, 3, by = 1),
+                            labels = c("12.5%", "25%", "50%", "100%", "200%", "300%", "400%")) +
+    labs(x = NULL, y = NULL,
+         title = "**Comparison of Performance in Volume, Difficulty & CPC<br>per SEO Tool and Keyword Category**<br>") +
+    guides(fill = guide_colorbar(barheight = unit(3, units = "mm"),  
+                                 barwidth = unit(130, units = "mm"),
+                                 direction = "horizontal",
+                                 ticks.colour = "white",
+                                 title.position = "top",
+                                 title.hjust = 0.5)) +
+    theme(axis.line.x = element_blank(),
+          axis.line.y = element_blank(),
+          axis.text.x = element_text(size = 12, face = "plain", angle = 30, 
+                                     vjust = 1, hjust = 1),
+          axis.text.y = element_text(size = 12, face = "plain"),
+          axis.ticks = element_blank(), 
+          legend.position = "top",
+          legend.title = element_text(size = 11),
+          legend.text = element_text(size = 9),
+          strip.text = element_text(face = "bold"),
+          plot.margin = margin(5.5, 22, 5.5, 5.5))
+
+if(save == T){ ggsave(here::here("plots", "6_1_ALL_heatmap_tool_cat_avg.png"), width = 10, height = 16, dpi = 300) }
+```
+
+
+```{r 6-1-ALL-heatmap-tool-cat-med, fig.width = 10, fig.height = 16}
+df_tools_long %>% 
+  left_join(df_cat_join) %>% 
+  filter(!is.na(keyword_cat)) %>% 
+  group_by(category) %>% 
+  mutate(med = median(value, na.rm = T)) %>% 
+  group_by(tool, category, keyword_cat) %>% 
+  summarize(
+    comp = median(value, na.rm = T) / unique(med),
+    log_med = log2(comp)
+  ) %>% 
+  ungroup() %>% 
+  mutate(
+    label = if_else(is.na(comp), glue::glue(""), glue::glue("{round(comp * 100, 0)}%")),
+    category = factor(category, 
+                      levels = c("volume", "diff", "cpc"),
+                      labels = c("Keyword Search Volume", 
+                                 "Difficulty Scores", 
+                                 "Cost per Click (CPC)"))
+  ) %>% 
+  ggplot(aes(keyword_cat, tool, fill = log_med)) +
+    geom_tile(color = "white", size = 0.8) +
+    geom_text(aes(label = label),
+                  family = "Montserrat", size = 2.2, 
+              fontface = "bold", color = "white") +
+    facet_wrap(~ category, ncol = 1) +
+    coord_equal() +
+    scale_x_discrete(expand = c(0, 0)) +
+    scale_y_discrete(expand = c(0, 0)) +
+    scico::scale_fill_scico(palette = "cork",
+                            name = "Difference to Overall Median",
+                            limits = c(-4.6, 4.6),
+                            breaks = seq(-4, 4, by = 1),
+                            labels = c("6.25%", "12.5%", "25%", "50%", "100%", "200%", "300%", "400%", "800%")) +
+    labs(x = NULL, y = NULL,
+         title = "**Comparison of Performance in Volume, Difficulty & CPC<br>per SEO Tool and Keyword Category**<br>") +
+    guides(fill = guide_colorbar(barheight = unit(3, units = "mm"),  
+                                 barwidth = unit(130, units = "mm"),
+                                 direction = "horizontal",
+                                 ticks.colour = "white",
+                                 title.position = "top",
+                                 title.hjust = 0.5)) +
+    theme(axis.line.x = element_blank(),
+          axis.line.y = element_blank(),
+          axis.text.x = element_text(size = 12, face = "plain", angle = 30, 
+                                     vjust = 1, hjust = 1),
+          axis.text.y = element_text(size = 12, face = "plain"),
+          axis.ticks = element_blank(), 
+          legend.position = "top",
+          legend.title = element_text(size = 11),
+          legend.text = element_text(size = 9),
+          strip.text = element_text(face = "bold"),
+          plot.margin = margin(5.5, 22, 5.5, 5.5))
+
+
+if(save == T){ ggsave(here::here("plots", "6_1_ALL_heatmap_tool_cat_med.png"), width = 10, height = 16, dpi = 300) }
+```
+
+## 6.2 Engine Performance Compared to *Google Keyword Planner*
+
+#### Lollipop Plots of Average Difference
+
+```{r 6-2-ALL-lollipops-tools-versus-gkp-mean, fig.width = 20, fig.height = 6.7}
+## comparison of average vol, diff and cpc
+df_tools_ref <-
+  df_tools_long %>% 
+  filter(tool == "Google Keyword Planner") %>% 
+  group_by(category) %>% 
+  summarize(ref = mean(value, na.rm = T)) %>% 
+  left_join(filter(df_tools_long, tool != "Google Keyword Planner")) %>% 
+  group_by(tool, category) %>% 
+  summarize(difference = mean(value, na.rm = T) - unique(ref)) %>% 
+ungroup()
+
+## plot search volume
+lolli_vol <-
+  df_tools_ref %>% 
+  filter(category == "volume") %>% 
+  mutate(
+    tool_fct = fct_reorder(tool, difference),
+    pos_r = if_else(difference >= 0, difference, NA_real_),
+    pos_l = if_else(difference < 0, difference, NA_real_)
+  ) %>% 
+  ggplot(aes(tool_fct, difference, 
+             color = tool)) + 
+    geom_segment(aes(x = tool_fct, xend = tool_fct, 
+                     y = 0, yend = difference),
+                 size = 1.5) +
+    geom_hline(yintercept = 0, color = "grey70", size = .9) +
+    geom_point(size = 5) +
+    geom_text(aes(tool_fct, pos_r, label = tool_fct), 
+              hjust = 0, nudge_y = 600,
+              family = "Montserrat", 
+              fontface = "bold", size = 4.7) +
+    geom_text(aes(tool_fct, pos_l, label = tool_fct), 
+              hjust = 1,  nudge_y = -600,
+              family = "Montserrat", 
+              fontface = "bold", size = 4.7) +
+    coord_flip() +
+    scale_y_continuous(labels = num_format,
+                       limits = c(-7100, NA),
+                       expand = c(.3, .3)) +
+    scale_color_carto_d(palette = "Bold", 
+                        limits = levels(df_tools$tool),
+                        guide = F) +
+    scale_fill_carto_d(palette = "Bold", 
+                       limits = levels(df_tools$tool),
+                       guide = F) +
+    labs(x = NULL, y = "Difference in Average Search Volume") +
+    theme_flip + 
+    theme_lolli
+
+## plot difficulty scores
+## not useful anymore since no difficulty output for GKP
+# lolli_dif <-
+#   df_tools_ref %>% 
+#   filter(category == "diff") %>% 
+#   mutate(
+#     tool_fct = fct_reorder(tool, difference),
+#     pos_r = if_else(difference >= 0, difference, NA_real_),
+#     pos_l = if_else(difference < 0, difference, NA_real_)
+#   ) %>% 
+#   ggplot(aes(tool_fct, difference, 
+#              color = tool)) + 
+#     geom_segment(aes(x = tool_fct, xend = tool_fct, 
+#                      y = 0, yend = difference),
+#                  size = 1.5) +
+#     geom_hline(yintercept = 0, color = "grey70", size = .9) +
+#     geom_point(size = 5) +
+#     geom_text(aes(tool_fct, pos_r, label = tool_fct), 
+#               hjust = 0, nudge_y = 3,
+#               family = "Montserrat", 
+#               fontface = "bold", size = 4.7) +
+#     geom_text(aes(tool_fct, pos_l, label = tool_fct), 
+#               hjust = 1,  nudge_y = -3,
+#               family = "Montserrat", 
+#               fontface = "bold", size = 4.7) +
+#     coord_flip() +
+#     scale_y_continuous(labels = num_format,
+#                        expand = c(.2, .2)) +
+#     scale_color_carto_d(palette = "Bold", 
+#                         limits = levels(df_tools$tool),
+#                         guide = F) +
+#     scale_fill_carto_d(palette = "Bold", 
+#                        limits = levels(df_tools$tool),
+#                        guide = F) +
+#     labs(x = NULL, y = "Difference in Average Difficulty Score",
+#          title = "**Performance of SEO Tools in Comparison to Google Keyword Planner** (comparison of averages)") +
+#     theme_flip + 
+#     theme_lolli +
+#     theme(plot.title = element_markdown(size = 22, margin = margin(b = 20)))
+
+## plot cost per click
+lolli_cpc <-
+  df_tools_ref %>% 
+  filter(
+    category == "cpc",
+    !is.na(difference)
+  ) %>% 
+  mutate(
+    tool_fct = fct_reorder(tool, difference),
+    pos_r = if_else(difference >= 0, difference, NA_real_),
+    pos_l = if_else(difference < 0, difference, NA_real_)
+  ) %>% 
+  ggplot(aes(tool_fct, difference, 
+             color = tool)) + 
+    geom_segment(aes(x = tool_fct, xend = tool_fct, 
+                     y = 0, yend = difference),
+                 size = 1.5) +
+    geom_hline(yintercept = 0, color = "grey70", size = .9) +
+    geom_point(size = 5) +
+    geom_text(aes(tool_fct, pos_r, label = tool_fct), 
+              hjust = 0, nudge_y = .1,
+              family = "Montserrat", 
+              fontface = "bold", size = 4.7) +
+    geom_text(aes(tool_fct, pos_l, label = tool_fct), 
+              hjust = 1,  nudge_y = -.1,
+              family = "Montserrat", 
+              fontface = "bold", size = 4.7) +
+    coord_flip() +
+    scale_y_continuous(labels = num_format,
+                       limits = c(-2.1, NA),
+                       expand = c(.2, .2)) +
+    scale_color_carto_d(palette = "Bold", 
+                        limits = levels(df_tools$tool),
+                        guide = F) +
+    scale_fill_carto_d(palette = "Bold", 
+                       limits = levels(df_tools$tool),
+                       guide = F) +
+    labs(x = NULL, y = "Difference in Average Cost per Click (CPC)") +
+    theme_flip + 
+    theme_lolli
+
+## centered main title
+title <- ggplot(data.frame(x = 1:2, y = 1:10)) +
+  labs(x = NULL, y = NULL,
+       title = "**Performance of SEO Tools in Comparison to Google Keyword Planner**",
+       subtitle = "(comparison of averages)") +
+  theme(line = element_blank(),
+        plot.background = element_rect(fill = NA, color = NA),
+        panel.background = element_rect(fill = NA, color = NA),
+        axis.text = element_blank(),
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank())
+
+title + (lolli_vol + lolli_cpc) + plot_layout(heights = c(0, 1))
+
+if(save == T){ ggsave(here::here("plots", "6_2_ALL_lollipops_tool_average.png"), width = 14, height = 5, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* *Sixtrix* and *KeywordTool.io* generate considerably higher search volumes than *Google Keyword Planner*, *Ahrefs* and *Moz* remarkably lower ones.
+
+* *SECockpit* and *Sixtrix* report higher cost per click than *Google Keyword Planner*, all other SEO tools lower costs.
+<br><br>
+
+#### Lollipop Plots of Median Difference
+
+```{r 6-2-ALL-lollipops-tools-versus-gkp-median, fig.width = 20, fig.height = 6.7}
+## comparison of median vol, diff and cpc
+df_tools_ref_m <-
+  df_tools_long %>% 
+  filter(tool == "Google Keyword Planner") %>% 
+  group_by(category) %>% 
+  summarize(ref = median(value, na.rm = T)) %>% 
+  left_join(filter(df_tools_long, tool != "Google Keyword Planner")) %>% 
+  group_by(tool, category) %>% 
+  summarize(difference = median(value, na.rm = T) - unique(ref)) %>% 
+  ungroup()
+
+## plot search volume
+lolli_vol_m <-
+  df_tools_ref_m %>% 
+  filter(category == "volume") %>% 
+  mutate(
+    tool_fct = fct_reorder(tool, difference),
+    pos_r = if_else(difference >= 0, difference, NA_real_),
+    pos_l = if_else(difference < 0, difference, NA_real_)
+  ) %>% 
+  ggplot(aes(tool_fct, difference, 
+             color = tool)) + 
+    geom_segment(aes(x = tool_fct, xend = tool_fct, 
+                     y = 0, yend = difference),
+                 size = 1.5) +
+    geom_hline(yintercept = 0, color = "grey70", size = .9) +
+    geom_point(size = 5) +
+    geom_text(aes(tool_fct, pos_r, label = tool_fct), 
+              hjust = 0, nudge_y = 400,
+              family = "Montserrat", 
+              fontface = "bold", size = 4.7) +
+    geom_text(aes(tool_fct, pos_l, label = tool_fct), 
+              hjust = 1,  nudge_y = -400,
+              family = "Montserrat", 
+              fontface = "bold", size = 4.7) +
+    coord_flip() +
+    scale_y_continuous(labels = num_format,
+                       limits = c(-3000, NA),
+                       expand = c(.15, .15)) +
+    scale_color_carto_d(palette = "Bold", 
+                        limits = levels(df_tools$tool),
+                        guide = F) +
+    scale_fill_carto_d(palette = "Bold", 
+                       limits = levels(df_tools$tool),
+                       guide = F) +
+    labs(x = NULL, y = "Difference in Median Search Volume") +
+    theme_flip + 
+    theme_lolli
+
+## plot difficulty scores
+## not useful anymore since no difficulty output for GKP
+# lolli_dif_m <-
+#   df_tools_ref_m %>% 
+#   filter(category == "diff") %>% 
+#   mutate(
+#     tool_fct = fct_reorder(tool, difference),
+#     pos_r = if_else(difference >= 0, difference, NA_real_),
+#     pos_l = if_else(difference < 0, difference, NA_real_)
+#   ) %>% 
+#   ggplot(aes(tool_fct, difference, 
+#              color = tool)) + 
+#     geom_segment(aes(x = tool_fct, xend = tool_fct, 
+#                      y = 0, yend = difference),
+#                  size = 1.5) +
+#     geom_hline(yintercept = 0, color = "grey70", size = .9) +
+#     geom_point(size = 5) +
+#     geom_text(aes(tool_fct, pos_r, label = tool_fct), 
+#               hjust = 0, nudge_y = 3,
+#               family = "Montserrat", 
+#               fontface = "bold", size = 4.7) +
+#     geom_text(aes(tool_fct, pos_l, label = tool_fct), 
+#               hjust = 1,  nudge_y = -3,
+#               family = "Montserrat", 
+#               fontface = "bold", size = 4.7) +
+#     coord_flip() +
+#     scale_y_continuous(labels = num_format,
+#                        limits = c(-80, 45),
+#                        expand = c(.1, .1)) +
+#     scale_color_carto_d(palette = "Bold", 
+#                         limits = levels(df_tools$tool),
+#                         guide = F) +
+#     scale_fill_carto_d(palette = "Bold", 
+#                        limits = levels(df_tools$tool),
+#                        guide = F) +
+#     labs(x = NULL, y = "Difference in Median Difficulty Score",
+#          title = "**Performance of SEO Tools in Comparison to Google Keyword Planner** (comparison of medians)") +
+#     theme_flip + 
+#     theme_lolli +
+#     theme(plot.title = element_markdown(size = 22, margin = margin(b = 20)))
+
+## plot cost per click
+lolli_cpc_m <-
+  df_tools_ref_m %>% 
+  filter(
+    category == "cpc",
+    !is.na(difference)
+  ) %>% 
+  mutate(
+    tool_fct = fct_reorder(tool, difference),
+    pos_r = if_else(difference >= 0, difference, NA_real_),
+    pos_l = if_else(difference < 0, difference, NA_real_)
+  ) %>% 
+  ggplot(aes(tool_fct, difference, 
+             color = tool)) + 
+    geom_segment(aes(x = tool_fct, xend = tool_fct, 
+                     y = 0, yend = difference),
+                 size = 1.5) +
+    geom_hline(yintercept = 0, color = "grey70", size = .9) +
+    geom_point(size = 5) +
+    geom_text(aes(tool_fct, pos_r, label = tool_fct), 
+              hjust = 0, nudge_y = .08,
+              family = "Montserrat", 
+              fontface = "bold", size = 4.7) +
+    geom_text(aes(tool_fct, pos_l, label = tool_fct), 
+              hjust = 1,  nudge_y = -.08,
+              family = "Montserrat", 
+              fontface = "bold", size = 4.7) +
+    coord_flip() +
+    scale_y_continuous(labels = num_format,
+                       limits = c(-.9, .3),
+                       expand = c(.2, .2)) +
+    scale_color_carto_d(palette = "Bold", 
+                        limits = levels(df_tools$tool),
+                        guide = F) +
+    scale_fill_carto_d(palette = "Bold", 
+                       limits = levels(df_tools$tool),
+                       guide = F) +
+    labs(x = NULL, y = "Difference in Median Cost per Click (CPC)") +
+    theme_flip + 
+    theme_lolli
+
+## centered main title
+title_m <- ggplot(data.frame(x = 1:2, y = 1:10)) +
+  labs(x = NULL, y = NULL,
+       title = "**Performance of SEO Tools in Comparison to Google Keyword Planner**",
+       subtitle = "(comparison of medians)") +
+  theme(line = element_blank(),
+        plot.background = element_rect(fill = NA, color = NA),
+        panel.background = element_rect(fill = NA, color = NA),
+        axis.text = element_blank(),
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank())
+
+title_m + (lolli_vol_m + lolli_cpc_m) + plot_layout(heights = c(0, 1))
+
+if(save == T){ ggsave(here::here("plots", "6_2_ALL_lollipops_tool_median.png"), width = 14, height = 5, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* When looking at the medians per SEO tool, trends are similar to those found with average values.
+
+* However, *Sixtrix* now has by far the largest difference in dearch volume and *SECockpit* the only tool that reports higher cost per click than *Google Keyword Planner*.
+<br><br>
+
+
+```{r 6-3-ALL-heatmap-tools-top-keywords, fig.width = 20, fig.height = 6.7, include = F}
+## 6.3 Heatmap
+
+df_keywords_top <-
+  df_tools_long %>% 
+  group_by(category, keyword) %>% 
+  summarize(avg = mean(value, na.rm = T)) %>% 
+  group_by(category) %>% 
+  arrange(-avg) %>% 
+  mutate(rank_total = row_number()) %>% 
+  filter(rank_total <= 10 | rank_total > (max(rank_total) - 10))
+
+df_keywords_rank <-
+  df_tools_long %>% 
+  inner_join(df_keywords_top) %>% 
+  #filter(keyword %in% df_keywords_top$keyword) %>% 
+  group_by(category) %>% 
+  arrange(-value) %>% 
+  mutate(rank_tool = row_number())
+
+## heatmap volume
+df_keywords_rank %>% 
+  filter(category == "volume", rank_total <= 10) %>% 
+  mutate(keyword = fct_reorder(keyword, desc(rank_total))) %>% 
+  ggplot(aes(tool, keyword, fill = value)) +
+    geom_tile()
+```
+
+
+***
+
+# Appendix
+
+<details>
+ <summary>Additional Tables & Visualizations</summary>
+ 
+## 2 Keyword Suggestions
+ 
+### Data Table
+ 
+```{r A-2-KWS-data-table}
+## table
+df_kws %>%
+  dplyr::select(
+    Category = "category",
+    Keyword = "keyword",
+    `SEO Tool` = "tool",
+    Suggestions = "suggested",
+    `Median per Tool` = "tool_median",
+    `Median per Category` = "category_median"
+  ) %>% 
+  kable(format.args = list(big.mark = ",", 
+                           small.mark = ",", 
+                           decimal.mark = ".", 
+                           scientific = F)) %>%
+  kable_styling(fixed_thead = T) %>%
+  collapse_rows(columns = 1:2, valign = "top") %>%
+  scroll_box(width = "100%", height = "600px")
+```
+<br>
+To get a sense of the data, we are looking at the distribution of suggestions per SEO tool and keyword category.
+
+### Distribution on a Linear Scale
+
+#### Per SEO Tool:
+
+```{r A-2-KWS-histogram-tool, fig.width = 14, fig.height = 11}
+df_kws %>% 
+  ggplot(aes(suggested)) +
+    geom_histogram(aes(color = tool, fill = tool), binwidth = 300000) +
+    facet_wrap(~ tool, scales = "free_x", nrow = 3) +
+    coord_cartesian(xlim = c(range_kw[1], range_kw[2])) +
+    scale_x_continuous(labels = num_format, expand = c(.08, .08)) +
+    scale_color_carto_d(palette = "Prism", guide = F) +
+    scale_fill_carto_d(palette = "Prism", guide = F) +
+    labs(x = "Keywords Suggestions", y = "Count",
+         title = "**Counts of Keyword Suggestions by SEO Tool**") +
+    theme_facet +
+    theme(panel.grid.major.y = element_line(size = .25),
+          axis.text.x = element_text(size = 8))
+
+if(save == T){ ggsave(here::here("plots", "A2_KWS_histo_lin_tool.png"), width = 14, height = 11, dpi = 300) }
+```
+
+#### Per Keyword Category:
+
+```{r A-2-KWS-histogram-category, fig.width = 14, fig.height = 11}
+df_kws %>% 
+  ggplot(aes(suggested)) +
+    geom_histogram(aes(color = category_fct, fill = category_fct), binwidth = 300000) +
+    facet_wrap(~ category, scales = "free_x", ncol = 5) +
+    coord_cartesian(xlim = c(range_kw[1], range_kw[2])) +
+    scale_x_continuous(labels = num_format, expand = c(.1, .1),
+                       breaks = c(0, 3000000, 6000000)) +
+    scale_color_simpsons(guide = F) +
+    scale_fill_simpsons(guide = F) +
+    labs(x = "Keywords Suggestions", y = "Count",
+         title = "**Counts of Keyword Suggestions by Keyword Category**") +
+    theme_facet +
+    theme(panel.grid.major.y = element_line(size = .25),
+          axis.text.x = element_text(size = 8))
+
+if(save == T){ ggsave(here::here("plots", "A2_KWS_histo_lin_category.png"), width = 14, height = 11, dpi = 300) }
+```
+
+### Distribution on a Logarithmic Scale
+
+Since the data is *left-skewed* (i.e. many more observations with low values compared to higher ones), we are going to use a logarithmic scale for the histograms and most of the following plots.
+<br><br>
+
+#### Per SEO Tool:
+
+```{r A-2-KWS-histogram-tool-log, fig.width = 14, fig.height = 11}
+df_kws %>% 
+  ggplot(aes(suggested)) +
+    geom_histogram(aes(color = tool, fill = tool), binwidth = .4) +
+    facet_wrap(~ tool, scales = "free_x", nrow = 3) +
+    coord_cartesian(xlim = c(1, range_kw[2] + 10000000)) +
+    scale_x_log10(labels = num_format) +
+    scale_color_carto_d(palette = "Prism", guide = F) +
+    scale_fill_carto_d(palette = "Prism", guide = F) +
+    labs(x = "Keywords suggested", y = "Count",
+         title = "**Counts of Keyword Suggestions by SEO Tool**") +
+    theme_facet +
+    theme(panel.grid.major.y = element_line(size = .25),
+          axis.text.x = element_text(size = 8))
+
+if(save == T){ ggsave(here::here("plots", "A2_KWS_histo_log_tool.png"), width = 14, height = 11, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* *Google Keyword Planner* reaches very low levels of suggestions with a mean around 1,000.
+
+* *Ahrefs* and *SEMrush* reach the highest values of suggestions.
+
+* *Moz* only returns always a maximum of 1,000 sugestions.
+<br><br>
+  
+#### Per Keyword Category:
+
+```{r A-2-KWS-histogram-category-log, fig.width = 14, fig.height = 11}
+df_kws %>% 
+  ggplot(aes(suggested)) +
+    geom_histogram(aes(color = category_fct, fill = category_fct), binwidth = .4) +
+    facet_wrap(~ category, scales = "free_x", ncol = 5) +
+    coord_cartesian(xlim = c(1, range_kw[2] + 10000000)) +
+    scale_x_log10(labels = num_format) +
+    scale_color_simpsons(guide = F) +
+    scale_fill_simpsons(guide = F) +
+    labs(x = "Keywords suggested", y = "Count",
+         title = "**Counts of Keyword Suggestions by Keyword Category**") +
+    theme_facet +
+    theme(panel.grid.major.y = element_line(size = .25),
+          axis.text.x = element_text(size = 8))
+
+if(save == T){ ggsave(here::here("plots", "A2_KWS_histo_log_category.png"), width = 14, height = 11, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* Distributions of suggested keywords by category range from unimodal (e.g. *Web Hosting* and *Office Supplies*) to bimodal (e.g. *Vacations Travel*, *Wedding*, and *Women Fashion*) and more complex patterns.
+
+* Highest range are reached by the keywords *Financial Services*, *Online Marketing*, and *Women Fashion*.
+<br><br>
+
+### Raw Data Plots
+
+In the following, we are looking at each search, mapped to SEO tools and keyword categories. The grey, large dot represents the median of each group, here SEO tool which are ranked by this value:
+
+#### Per Search Eninge:
+
+```{r A-2-KWS-jitter-tool, fig.width = 14, fig.height = 10}
+## jitter per tool
+df_kws %>% 
+  ggplot(aes(tool_fct, suggested)) + 
+    stat_summary(fun.y = median, geom = "point", 
+                 size = 8, color = "grey70") +
+    geom_jitter(aes(color = category_fct), alpha = .7, width = .3) +
+    coord_flip() +
+    scale_y_continuous(labels = num_format, expand = c(.02, .02)) +
+    scale_color_simpsons(name = "Keyword Category:") +
+    guides(color = guide_legend(override.aes = list(size = 5))) +
+    labs(x = NULL, y = "Keyword Suggestions",
+         title = "**Each Search by SEO Tool**",
+         subtitle = "(tools ranked by overall median)") +
+    theme_flip + 
+    theme(axis.text.y = element_text(size = 13))
+
+if(save == T){ ggsave(here::here("plots", "A2_KWS_jitter_tool.png"), width = 14, height = 10, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* This plot highlights how skewed the data is - it might be useful to show the large differences between some SEO tools in combination with specific keyword categories(with a focus on SEO tools).
+
+* Even though the dots were jittered, overplotting makes it hard to distinguish each data point in the low-value-area - a log scale helps here.
+
+* Clear ranking when sorted by overall median: Indeed, *Ahrefs* and *SEMrush* suggest the highest values, followed by *Ubersuggest*,  *Moz*, and *Google Keyword Planner*.
+<br><br>
+
+#### Per Keyword Category:
+
+```{r A-2-KWS-jitter-category, fig.width = 14, fig.height = 10}
+## jitter per tool
+df_kws %>% 
+  ggplot(aes(category_fct, suggested)) + 
+    stat_summary(fun.y = median, geom = "point", 
+                 size = 6, color = "grey70") +
+    #geom_jitter(aes(color = tool), alpha = .7, width = .3) +
+    geom_quasirandom(aes(color = tool), 
+                     alpha = .7, size = 1.5, 
+                     width = .3, bandwidth = .3, varwidth = T) +
+    coord_flip() +
+    scale_y_continuous(labels = num_format, expand = c(.02, .02)) +
+    scale_color_carto_d(palette = "Prism", name = "SEO Tool:") +
+    guides(color = guide_legend(override.aes = list(size = 5))) +
+    labs(x = NULL, y = "Keyword Suggestions",
+         title = "**Each Search by Keyword Category**",
+         subtitle = "(categories ranked by overall median)") +
+    theme_flip + 
+    theme(axis.text.y = element_text(size = 13))
+
+if(save == T){ ggsave(here::here("plots", "A2_KWS_jitter_category.png"), width = 14, height = 10, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* Indeed, *Financial Services*, *Women Fashion*, and *Online Marketing* gather the most suggestions (ranked 1, 2, and 3 on the y axis), followed by *Wedding*, *Home Improvement*, and *Vacation Travel*.
+
+* Plot highlights how skewed the data is in terms of keyword categories and SEO tools (with a focus on categories).
+<br><br>
+
+#### Per SEO Tool and Keyword Category on a Logarithmic Scale
+
+Using small multiples, we can visualize the pattern of the raw data **per tool and keyword category** at the same time:
+
+```{r A-2-KWS-beeswarm-tool-log-facet, fig.width = 14, fig.height = 11}
+## facet
+df_kws %>% 
+  ggplot(aes(category_fct, suggested)) + 
+    stat_summary(fun.y = median, geom = "point", 
+                 size = 3, color = "grey70") +
+    geom_beeswarm(aes(color = category_fct), 
+                  alpha = .7, size = 1.5) +
+    facet_wrap(~ tool, scales = "free_x", nrow = 3) +
+    coord_flip() +
+    scale_y_log10(labels = num_format, 
+                  limits = c(range_kw[1], range_kw[2] + 10000000)) +
+    scale_color_simpsons(guide = F) +
+    labs(x = NULL, y = "Keyword Suggestions",
+         title = "**Each Search per Engine by Keyword Category**",
+         subtitle = "(categories ranked by overall median)") +
+    theme_flip +
+    theme_facet + 
+    theme(axis.text.y = element_text(face = "plain"),
+          axis.text.x = element_text(size = 9),
+          strip.text = element_text(face = "bold"))
+
+if(save == T){ ggsave(here::here("plots", "A2_KWS_bees_facet_tool.png"), width = 14, height = 11, dpi = 300) }
+```
+
+### Keywords by Length
+
+#### Per SEO Tool:
+
+```{r A-2-KWS-length-tool, fig.width = 14, fig.height = 9}
+df_kws %>% 
+  filter(!str_detect(keyword, "All 5 KW")) %>% 
+  mutate(length = nchar(keyword)) %>% 
+  ggplot(aes(length, suggested, color = tool, fill = tool)) +
+    geom_jitter(width = .1, alpha = .4) +
+    geom_smooth(method = "lm", color = "grey7", size = .8, alpha = .2) +
+    facet_wrap(~ tool, scales = "free_x", nrow = 3) +
+    scale_x_continuous(limits = c(1, 25),
+                       breaks = c(1, seq(5, 25, by = 5))) +
+    scale_y_log10(labels = num_format) +
+    scale_color_carto_d(palette = "Prism", guide = F) +
+    scale_fill_carto_d(palette = "Prism", guide = F) +
+    labs(x = "Number of Keyword Characters", 
+         y = "Keyword Suggestions",
+         title = "**Trends in Keyword Length per SEO Tool**") +
+    theme_facet
+
+if(save == T){ ggsave(here::here("plots", "A2_KWS_length_tool_lm.png"), width = 14, height = 9, dpi = 300) }
+
+df_kws %>% 
+  filter(!str_detect(keyword, "All 5 KW")) %>% 
+  mutate(length = nchar(keyword)) %>% 
+  ggplot(aes(length, suggested, color = tool, fill = tool)) +
+    geom_jitter(width = .1, alpha = .4) +
+    geom_smooth(color = "grey7", size = .8, alpha = .2) +
+    facet_wrap(~ tool, scales = "free_x", nrow = 3) +
+    scale_x_continuous(limits = c(1, 25),
+                       breaks = c(1, seq(5, 25, by = 5))) +
+    scale_y_log10(labels = num_format) +
+    scale_color_carto_d(palette = "Prism", guide = F) +
+    scale_fill_carto_d(palette = "Prism", guide = F) +
+    labs(x = "Number of Keyword Characters", 
+         y = "Keyword Suggestions",
+         title = "**Trends in Keyword Length per SEO Tool**") +
+    theme_facet
+
+if(save == T){ ggsave(here::here("plots", "A2_KWS_length_tool_loess.png"), width = 14, height = 9, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* 
+<br><br>
+
+#### Per Keyword Category:
+
+```{r A-2-KWS-length-category, fig.width = 14, fig.height = 10}
+df_kws %>% 
+  filter(!str_detect(keyword, "All 5 KW")) %>% 
+  mutate(length = nchar(keyword)) %>% 
+  ggplot(aes(length, suggested, color = category_fct, fill = category_fct)) +
+    geom_jitter(width = .1, alpha = .4, size = 2.5) +
+    geom_smooth(method = "lm", color = "grey7", size = .8, alpha = .2) +
+    facet_wrap(~ category, scales = "free_x", ncol = 5) +
+    scale_x_continuous(limits = c(1, 25),
+                       breaks = c(1, seq(5, 25, by = 5))) +
+    scale_y_log10(labels = num_format) +
+    scale_color_simpsons(guide = F) +
+    scale_fill_simpsons(guide = F) +
+    labs(x = "Number of Keyword Characters", 
+         y = "Keyword Suggestions",
+         title = "**Trends in Keyword Length per Keyword Category**") +
+    theme_facet
+
+if(save == T){ ggsave(here::here("plots", "A2_KWS_length_category_lm.png"), width = 14, height = 10, dpi = 300) }
+
+df_kws %>% 
+  filter(!str_detect(keyword, "All 5 KW")) %>% 
+  mutate(length = nchar(keyword)) %>% 
+  ggplot(aes(length, suggested, color = category_fct, fill = category_fct)) +
+    geom_jitter(width = .1, alpha = .4, size = 2.5) +
+    geom_smooth(color = "grey7", size = .8, alpha = .2) +
+    facet_wrap(~ category, scales = "free_x", ncol = 5) +
+    scale_x_continuous(limits = c(1, 25),
+                       breaks = c(1, seq(5, 25, by = 5))) +
+    scale_y_log10(labels = num_format) +
+    scale_color_simpsons(guide = F) +
+    scale_fill_simpsons(guide = F) +
+    labs(x = "Number of Keyword Characters", 
+         y = "Keyword Suggestions",
+         title = "**Trends in Keyword Length per Keyword Category**") +
+    theme_facet
+
+if(save == T){ ggsave(here::here("plots", "A2_KWS_length_category_loess.png"), width = 14, height = 10, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* 
+<br><br>
+
+***
+
+## 3 Keyword Search Volume
+
+### Summary Table
+
+```{r A-3-VOL-data-table}
+## summary table
+df_vol %>%
+  dplyr::select(
+    `SEO Tool` = "tool", 
+    volume
+  ) %>% 
+  group_by(`SEO Tool`) %>% 
+  summarize(
+    Minimum = min(volume, na.rm = T),
+    Average = round(mean(volume, na.rm = T), 1),
+    Median = median(volume, na.rm = T),
+    Maximum = max(volume, na.rm = T),
+    NAs = sum(is.na(volume))
+  ) %>% 
+  kable(format.args = list(big.mark = ",", 
+                           small.mark = ",", 
+                           decimal.mark = ".", 
+                           scientific = F)) %>%
+  kable_styling() %>% 
+  column_spec(1, extra_css = "vertical- align:middle;")
+```
+<br>
+
+### Comparison Number of Keywords
+
+```{r A-3-VOL-summary-tool, fig.width = 14, fig.height = 7}
+df_vol %>% 
+  group_by(tool) %>% 
+  summarize(n = n()) %>% 
+  ggplot(aes(fct_reorder(tool, n), n, 
+             fill = tool)) +
+    geom_col(color = NA, width = .7) +
+    geom_hline(yintercept = seq(0, 10000, by = 2500),
+               color = "white", size = .5) +
+    coord_flip() +
+    scale_y_continuous(labels = num_format, 
+                       limits = c(0, 10100),
+                       expand = c(.01, .01)) +
+    scale_fill_carto_d(palette = "Bold", guide = F) +
+    labs(x = NULL, y = "Keywords",
+         title = "**Number of Keywords per SEO Tool**") +
+    theme_flip +
+    theme(panel.grid.major.x = element_blank(),
+          axis.text.x = element_text(size = 8))
+
+if(save == T){ ggsave(here::here("plots", "A3_VOL_bars_tool.png"), width = 14, height = 7, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* 
+<br><br>
+
+### Distribution on a Linear Scale
+
+```{r A-3-VOL-histogram-tool, fig.width = 14, fig.height = 9}
+df_vol %>% 
+  ggplot(aes(volume)) +
+    geom_histogram(aes(color = tool, fill = tool), binwidth = 200000) +
+    facet_wrap(~ tool, scales = "free_x", nrow = 3) +
+    coord_cartesian(xlim = c(range_vol[1], range_vol[2])) +
+    scale_x_continuous(labels = num_format, expand = c(.1, .1)) +
+    scale_color_carto_d(palette = "Bold", guide = F) +
+    scale_fill_carto_d(palette = "Bold", guide = F) +
+    labs(x = "Search Volume", y = "Count",
+         title = "**Distribution of Search Volume by SEO Tool**") +
+    theme_facet +
+    theme(panel.grid.major.y = element_line(size = .25),
+          axis.text.x = element_text(size = 8))
+
+if(save == T){ ggsave(here::here("plots", "A3_VOL_histo_lin_tool.png"), width = 14, height = 9, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* 
+<br><br>
+
+### Distribution on a Logarithmic Scale
+
+```{r A-3-VOL-histogram-tool-log, fig.width = 14, fig.height = 9}
+df_vol %>% 
+  ggplot(aes(volume)) +
+    geom_histogram(aes(color = tool, fill = tool), binwidth = .35) +
+    facet_wrap(~ tool, scales = "free_x", nrow = 3) +
+    coord_cartesian(xlim = c(1.9, range_vol[2] + 5000000)) +
+    scale_x_log10(labels = num_format) +
+    scale_color_carto_d(palette = "Bold", guide = F) +
+    scale_fill_carto_d(palette = "Bold", guide = F) +
+    labs(x = "Search Volume", y = "Count",
+         title = "**Distribution of Search Volume by SEO Tool**") +
+    theme_facet +
+    theme(panel.grid.major.y = element_line(size = .25),
+          axis.text.x = element_text(size = 8))
+
+if(save == T){ ggsave(here::here("plots", "A3_VOL_histo_log_tool.png"), width = 14, height = 9, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* 
+<br><br>
+
+***
+
+
+## 4 Keyword Difficulty Scores
+
+### Summary Table
+
+```{r A-4-DIF-data-table}
+## summary table
+df_diff %>%
+  dplyr::select(
+    `SEO Tool` = "tool", 
+    diff
+  ) %>% 
+  group_by(`SEO Tool`) %>% 
+  summarize(
+    Minimum = round(min(diff, na.rm = T), 2),
+    Average = round(mean(diff, na.rm = T), 2),
+    Median = round(median(diff, na.rm = T), 2),
+    Maximum = round(max(diff, na.rm = T), 2),
+    NAs = sum(is.na(diff))
+  ) %>%
+  kable(format.args = list(big.mark = ",", 
+                           small.mark = ",", 
+                           decimal.mark = ".", 
+                           scientific = F)) %>%
+  kable_styling() %>% 
+  column_spec(1, extra_css = "vertical- align:middle;")
+```
+<br>
+
+### Comparison Number of Keywords
+
+```{r A-4-DIF-summary-tool, fig.width = 14, fig.height = 6}
+df_diff %>% 
+  group_by(tool) %>% 
+  summarize(n = n()) %>% 
+  ggplot(aes(fct_reorder(tool, n), n, 
+             fill = tool)) +
+    geom_col(color = NA, width = .7) +
+    geom_hline(yintercept = seq(0, 10000, by = 2500),
+               color = "white", size = .5) +
+    coord_flip() +
+    scale_y_continuous(labels = num_format, 
+                       limits = c(0, 10100),
+                       expand = c(.01, .01)) +
+    scale_fill_carto_d(palette = "Bold", guide = F, 
+                       limits = levels(df_tools$tool)) +
+    labs(x = NULL, y = "Keywords",
+         title = "**Number of Keywords per SEO Tool**") +
+    theme_flip +
+    theme(panel.grid.major.x = element_blank(),
+          axis.text.x = element_text(size = 8))
+
+if(save == T){ ggsave(here::here("plots", "A4_DIF_bars_tool.png"), width = 14, height = 6, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* 
+<br><br>
+
+### Distribution on a Linear Scale
+
+```{r A-4-DIF-histogram-tool, fig.width = 14, fig.height = 7}
+df_diff %>% 
+  ggplot(aes(diff)) +
+    geom_histogram(aes(color = tool, fill = tool), binwidth = 5) +
+    facet_wrap(~ tool, scales = "free_x", nrow = 2) +
+    coord_cartesian(xlim = c(-2, range_diff[2]), expand = c(.1, .1)) +
+    scale_x_continuous(labels = num_format) +
+    scale_color_carto_d(palette = "Bold", guide = F, 
+                        limits = levels(df_tools$tool)) +
+    scale_fill_carto_d(palette = "Bold", guide = F, 
+                       limits = levels(df_tools$tool)) +
+    labs(x = "Difficulty Score", y = "Count",
+         title = "**Distribution of Difficulty Scores by SEO Tool**") +
+    theme_facet +
+    theme(panel.grid.major.y = element_line(size = .25),
+          axis.text.x = element_text(size = 8))
+
+if(save == T){ ggsave(here::here("plots", "A4_DIF_histo_lin_tool.png"), width = 14, height = 7, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* 
+<br><br>
+
+### Distribution on a Logarithmic Scale
+
+```{r A.4-DIF-histogram-tool-log, fig.width = 14, fig.height = 7}
+df_diff %>% 
+  ggplot(aes(diff)) +
+    geom_histogram(aes(color = tool, fill = tool), binwidth = .1) +
+    facet_wrap(~ tool, scales = "free_x", nrow = 2) +
+    coord_cartesian(xlim = c(.9, range_diff[2])) +
+    scale_x_log10(labels = num_format) +
+    scale_color_carto_d(palette = "Bold", guide = F, 
+                        limits = levels(df_tools$tool)) +
+    scale_fill_carto_d(palette = "Bold", guide = F, 
+                       limits = levels(df_tools$tool)) +
+    labs(x = "Difficulty Score", y = "Count",
+         title = "**Distribution of Difficulty Scores by SEO Tool**") +
+    theme_facet +
+    theme(panel.grid.major.y = element_line(size = .25),
+          axis.text.x = element_text(size = 8))
+
+if(save == T){ ggsave(here::here("plots", "A4_DIF_histo_log_tool.png"), width = 14, height = 7, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* 
+<br><br>
+
+***
+
+
+## 5 Cost per Click (CPC)
+
+### Summary Table
+
+```{r A-5-CPC-data-table}
+df_cpc %>%
+  dplyr::select(
+    `SEO Tool` = "tool", 
+    cpc
+  ) %>% 
+  group_by(`SEO Tool`) %>% 
+  summarize(
+    Minimum = round(min(cpc, na.rm = T), 2),
+    Average = round(mean(cpc, na.rm = T), 2),
+    Median = round(median(cpc, na.rm = T), 2),
+    Maximum = round(max(cpc, na.rm = T), 2),
+    NAs = sum(is.na(cpc))
+  ) %>% 
+  kable(format.args = list(big.mark = ",", 
+                           small.mark = ",", 
+                           decimal.mark = ".", 
+                           scientific = F)) %>%
+  kable_styling() %>% 
+  column_spec(1, extra_css = "vertical- align:middle;")
+```
+<br>
+
+### Comparison Number of Keywords
+
+```{r A-5-CPC-summary-tool, fig.width = 14, fig.height = 7}
+df_cpc %>% 
+  group_by(tool) %>% 
+  summarize(n = n()) %>% 
+  ggplot(aes(fct_reorder(tool, n), n, 
+             fill = tool)) +
+    geom_col(color = NA, width = .7) +
+    geom_hline(yintercept = seq(0, 10000, by = 2500),
+               color = "white", size = .5) +
+    coord_flip() +
+    scale_y_continuous(labels = num_format, 
+                       limits = c(0, 10100),
+                       expand = c(.01, .01)) +
+    scale_fill_carto_d(palette = "Bold", guide = F, 
+                       limits = levels(df_tools$tool)) +
+    labs(x = NULL, y = "Keywords",
+         title = "**Number of Keywords per SEO Tool**") +
+    theme_flip +
+    theme(panel.grid.major.x = element_blank(),
+          axis.text.x = element_text(size = 8))
+
+if(save == T){ ggsave(here::here("plots", "A5_CPC_bars_tool.png"), width = 14, height = 7, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* 
+<br><br>
+
+### Distribution on a Linear Scale
+
+```{r A-5-CPC-histogram-tool, fig.width = 14, fig.height = 7}
+df_cpc %>% 
+  ggplot(aes(cpc)) +
+    geom_histogram(aes(color = tool, fill = tool), binwidth = 30) +
+    facet_wrap(~ tool, scales = "free_x", nrow = 2) +
+    coord_cartesian(xlim = c(-20, range_cpc[2], expand = c(.1, .1))) +
+    scale_x_continuous(labels = num_format) +
+    scale_color_carto_d(palette = "Bold", guide = F, 
+                        limits = levels(df_tools$tool)) +
+    scale_fill_carto_d(palette = "Bold", guide = F, 
+                       limits = levels(df_tools$tool)) +
+    labs(x = "CPC", y = "Count",
+         title = "**Distribution of Cost per Click (CPC) by SEO Tool**") +
+    theme_facet +
+    theme(panel.grid.major.y = element_line(size = .25),
+          axis.text.x = element_text(size = 8))
+
+if(save == T){ ggsave(here::here("plots", "A5_CPC_histo_lin_tool.png"), width = 14, height = 7, dpi = 300) }
+```
+
+<font size="+1">Key takeaways:</font> 
+
+* 
+<br><br>
+
+</details>
+
+
+***
+
+<details>
+ <summary>Session Info</summary>
+```{r sessionInfo, echo = F}
+sessionInfo()
+```
+</details>
+
+<br><br>

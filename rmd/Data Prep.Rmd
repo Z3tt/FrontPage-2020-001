@@ -1,0 +1,304 @@
+---
+title: "Data Prep"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r}
+required_packages <- c("tidyverse", "readxl", "ggthemes", "hrbrthemes", "extrafont", "plotly", "scales", "stringr", "gganimate", "here", "tidytext", "sentimentr", "scales", "DT", "here", "sm", "mblm", "prettydoc", "reshape2", "treemapify", "glue", "magick", "imager", "fs", "knitr", "DataExplorer", "inspectdf", "rmdformats", "prettydoc", "janitor")
+
+for(i in required_packages) { 
+if(!require(i, character.only = T)) {
+#  if package is not existing, install then load the package
+install.packages(i, dependencies = T)
+require(i, character.only = T)
+}
+}
+```
+
+
+
+```{r}
+#Import data from GKP_DE_CLEAN
+file_names_csv <- list.files(path = here("raw_data/Step2_GKP_clean/GKP_DE_CLEAN"), recursive = TRUE, full.names = T) 
+
+
+file <- map(file_names_csv, read_csv) 
+
+names(file) <- gsub(".csv","",
+                       list.files(here("raw_data/Step2_GKP_clean/GKP_DE_CLEAN"), full.names = FALSE),
+                       fixed = TRUE)
+
+
+GKP_DE_CLEAN <- bind_rows(file, .id = "column_name") %>% 
+  clean_names() 
+```
+
+
+```{r}
+#Import data from GKP_US_CLEAN
+file_names_csv <- list.files(path = here("raw_data/Step2_GKP_clean/GKP_US_CLEAN"), recursive = TRUE, full.names = T) 
+
+
+file <- map(file_names_csv, read_csv) 
+
+names(file) <- gsub(".csv","",
+                       list.files(here("raw_data/Step2_GKP_clean/GKP_US_CLEAN"), full.names = FALSE),
+                       fixed = TRUE)
+
+
+GKP_US_CLEAN <- bind_rows(file, .id = "column_name") %>% 
+  clean_names() 
+```
+
+
+```{r}
+# merge, clean and limit to 10k observations 
+
+
+GKP_final <- GKP_DE_CLEAN %>%  
+  full_join(y = GKP_US_CLEAN, by = "keyword") %>% 
+  tbl_df()
+
+
+GKP_final_clean <- GKP_final %>%
+  select(column_name.x, keyword, avg_monthly_searches.x, competition.x, competition_indexed_value.x, top_of_page_bid_low_range.y, top_of_page_bid_high_range.y) %>%
+  filter(GKP_final$avg_monthly_searches.x >= 100) %>% 
+  drop_na() %>% 
+  arrange(desc(avg_monthly_searches.x)) %>% 
+  mutate(volume_cat = case_when(avg_monthly_searches.x > 10000 ~ "+10000", 
+                                     avg_monthly_searches.x > 1000 & avg_monthly_searches.x <= 10000 ~ "1000-10000", 
+                                     avg_monthly_searches.x > 100 & avg_monthly_searches.x <= 1000 ~ "100-1000")) %>%
+  mutate(volume_cat = factor(volume_cat, levels = c("100-1000", 
+                                                              "1000-10000",
+                                                              "+10000")))                                           
+
+
+GKP_final_clean %>% 
+  count(GKP_final_clean$volume_cat)
+
+# 1 100-1000                     16994
+# 2 1000-10000                   13103
+# 3 +10000                        4093
+
+
+```
+
+
+```{r}
+#select each factor from db
+gkp_small_volume <- GKP_final_clean %>% 
+  filter(volume_cat == "100-1000") %>% 
+  sample_n(size = 3333)
+
+gkp_medium <- GKP_final_clean %>% 
+  filter(volume_cat == "1000-10000") %>% 
+  sample_n(size = 3334)
+
+gkp_large <- GKP_final_clean %>% 
+  filter(volume_cat == "+10000") %>% 
+  sample_n(size = 3333)
+
+
+
+GKP_final_export <- bind_rows(gkp_small_volume, gkp_medium, gkp_large)
+
+GKP_final_export %>% 
+  count(GKP_final_export$column_name.x)
+
+```
+
+
+```{r}
+#Final 
+write_csv(GKP_final_export, here("raw_data/Step3_Tools_data/1_Google_keyword_Planer_basis/raw/GKP_data.csv"))
+
+```
+
+
+# STEP 2
+
+#Extraction need to be done in one move with all the data
+
+#1 Final Google Keyword Planner Data
+
+```{r}
+#changed file name and upload; in case need to modify export; data stays the same; not Ahrefs with one keyword data and MOz with other.
+GKP_final_split <- read_csv(here("raw_data/Step3_Tools_data/1_Google_keyword_Planer_basis/GKP_data_final_split.csv"))
+```
+
+
+
+
+#2 Ahrefs
+
+```{r}
+#write into txt file
+GKP_final_split %>% 
+  select(keyword) %>% 
+  write_tsv("raw_data/Step3_Tools_data/2_Ahrefs/keywords_ahrefs.txt", col_names = F)
+
+
+```
+
+
+
+
+# 3 Moz
+
+```{r}
+#split data into 20 dfs files and write each into csv; only column keyword relevant!
+chunk <- 20
+n <- nrow(GKP_final_split)
+r  <- rep(1:chunk,each=ceiling(n/chunk))[1:n]
+d <- split(GKP_final_split %>% select(keyword), r)
+
+#path = keyword-analytics\raw_data\Step3_Tools_data\3_MOZ\raw
+invisible(
+  sapply(names(d),
+         function (x) write_csv(d[[x]], 
+                                here(paste0("raw_data/Step3_Tools_data/3_MOZ/raw/",
+                                            "keywords_moz_",
+                                            sprintf("%02d", as.numeric(x)), ".csv"))))
+)
+
+```
+
+
+# 4 SEMrush
+
+```{r}
+#split into 100 dfs and write into 100 txt files, only keyword column, without col_names = F, only column keyword relevant!
+chunk <- 100
+n <- nrow(GKP_final_split)
+r  <- rep(1:chunk,each=ceiling(n/chunk))[1:n]
+d <- split(GKP_final_split %>% select(keyword), r)
+
+# path = keyword-analytics\raw_data\Step3_Tools_data\4_SemRush\raw
+invisible(
+  sapply(names(d),
+         function (x) write_tsv(d[[x]],
+                                col_names = F,
+                                here(paste0("raw_data/Step3_Tools_data/4_SemRush/raw/",
+                                            "keywords_semrush_",
+                                            sprintf("%03d", as.numeric(x)), ".tsv"))))
+)
+```
+
+
+# 5 Keywordtool
+
+```{r}
+#split into 15 dfs and write into 15 txt files, only keyword column, without col_names = F, only column keyword relevant!
+chunk <- 15
+n <- nrow(GKP_final_split)
+r  <- rep(1:chunk,each=ceiling(n/chunk))[1:n]
+d <- split(GKP_final_split %>% select(keyword), r)
+
+# path = 
+invisible(
+  sapply(names(d),
+         function (x) write_tsv(d[[x]],
+                                col_names = F,
+                                here(paste0("raw_data/Step3_Tools_data/5_Keywordtool/raw/",
+                                            "keywords_keywordtool_",
+                                            sprintf("%02d", as.numeric(x)), ".tsv"))))
+)
+```
+
+
+# 6 KWfinder
+
+```{r}
+#split into 15 dfs and write into 15 txt files, only keyword column, without col_names = F, only column keyword relevant!
+chunk <- 15
+n <- nrow(GKP_final_split)
+r  <- rep(1:chunk,each=ceiling(n/chunk))[1:n]
+d <- split(GKP_final_split %>% select(keyword), r)
+
+# path = keyword-analytics\raw_data\Step3_Tools_data\6_KWfinder\raw
+invisible(
+  sapply(names(d),
+         function (x) write_tsv(d[[x]],
+                                col_names = F,
+                                here(paste0("raw_data/Step3_Tools_data/6_KWfinder/raw/",
+                                            "keywords_kwfinder_",
+                                            sprintf("%02d", as.numeric(x)), ".tsv"))))
+)
+
+```
+
+
+# 7 LongtailPro
+
+```{r}
+#split into 50 dfs and write into csv, only column keyword relevant!
+
+chunk <- 50
+n <- nrow(GKP_final_split)
+r  <- rep(1:chunk,each=ceiling(n/chunk))[1:n]
+d <- split(GKP_final_split %>% select(keyword), r)
+
+# path = keyword-analytics\raw_data\Step3_Tools_data\4_SemRush\raw
+invisible(
+  sapply(names(d),
+         function (x) write_tsv(d[[x]],
+                                col_names = F,
+                                here(paste0("raw_data/Step3_Tools_data/7_LongtailPro/raw/",
+                                            "keywords_longtailpro_",
+                                            sprintf("%03d", as.numeric(x)), ".txt"))))
+)
+
+
+```
+
+
+# 8 SEOcockpit
+
+```{r}
+#split into 10 dfs and write into 10 txt files, only keyword column, without col_names = F, only column keyword relevant!
+chunk <- 10
+n <- nrow(GKP_final_split)
+r  <- rep(1:chunk,each=ceiling(n/chunk))[1:n]
+d <- split(GKP_final_split %>% select(keyword), r)
+
+# path = keyword-analytics\raw_data\Step3_Tools_data\8_SECockpit\raw
+invisible(
+  sapply(names(d),
+         function (x) write_tsv(d[[x]],
+                                col_names = F,
+                                here(paste0("raw_data/Step3_Tools_data/8_SECockpit/raw/",
+                                            "keywords_seocockpit_",
+                                            sprintf("%02d", as.numeric(x)), ".tsv"))))
+)
+
+
+```
+
+
+# 9 Sixtrix
+
+```{r}
+# use dyplr group_split and select randonly 1000 rows from volume_cat, only column keyword relevant!
+d <- GKP_final_split %>%
+  group_by(volume_cat) %>%
+  group_split()
+
+final_d <- list()
+for (i in 1:length(d)) {
+    current_volume_cat <- d[[i]]$volume_cat[1]
+  final_d[[i]] <- d[[i]] %>% 
+    sample_n(ifelse(current_volume_cat == "1000-10000", 334, 333))
+}
+
+#then write into 1 txt file
+# path = keyword-analytics\raw_data\Step3_Tools_data\9_Sixtrix\raw
+bind_rows(final_d) %>%
+  select(keyword) %>% 
+  write_tsv("raw_data/Step3_Tools_data/9_Sixtrix/raw/keywords_sixtrix.txt", col_names = F)
+
+```
+
+
